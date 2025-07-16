@@ -5,12 +5,12 @@ This repository contains the original implementation of an agent-based economic 
 ## Contents
 
 - `EmergentMoney.pdf` &ndash; Document describing the concepts and rules behind the simulation.
-- `adamsmithfeb17B.c` &ndash; Legacy C source code (written around 2010) implementing the simulation from the PDF. It depends on `stdheaders.h`, which is not included here.
+- `Working_Legacy_Code_Reference.pdf` &ndash; Nwely annotated Legacy C source code (code written around 2010) implementing the simulation from the EmergentMoney.PDF. It depends on `stdheaders.h`, which is not included here.
 - `LICENSE` &ndash; MIT license covering the repository contents.
 
 ## Purpose of this Repository
 
-The legacy C code does not directly reference the PDF, but it is an early attempt at turning the ideas in *Emergent Money* into a working program. Today it serves primarily as a historical reference. We do **not** aim to compile or run this version as-is; instead, both the PDF and the C code are used as guidance while rebuilding the simulation with modern tools.
+The legacy C code in Working_Legacy_Code_Reference.pdf is annotated to be in sync with the PDF, and the code has been used to produce the reported results found in *Emergent Money*. Today it serves primarily as a historical reference. We do **not** aim to compile or run this version as-is; instead, both the PDF-report and the annotated C code are used as guidance while rebuilding the simulation with modern tools.
 
 ## Modernisation Goals
 
