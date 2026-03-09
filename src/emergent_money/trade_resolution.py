@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +10,8 @@ import numpy as np
 class ResolvedTrades:
     accepted_mask: Any
     accepted_quantity: Any
+    stock: Any
+    need: Any
 
 
 @dataclass(slots=True, frozen=True)
@@ -96,6 +98,8 @@ def resolve_trade_proposals(
     return ResolvedTrades(
         accepted_mask=accepted_mask,
         accepted_quantity=accepted_quantity,
+        stock=available_stock,
+        need=remaining_need,
     )
 
 
@@ -116,13 +120,13 @@ def commit_resolved_trades(
     accepted_quantity: np.ndarray,
     initial_transparency: float,
 ) -> CommittedTradeState:
-    updated_stock = stock.astype(np.float32, copy=True)
-    updated_need = need.astype(np.float32, copy=True)
-    updated_recent_sales = recent_sales.astype(np.float32, copy=True)
-    updated_recent_purchases = recent_purchases.astype(np.float32, copy=True)
-    updated_friend_id = friend_id.astype(np.int32, copy=True)
-    updated_friend_activity = friend_activity.astype(np.float32, copy=True)
-    updated_transparency = transparency.astype(np.float32, copy=True)
+    updated_stock = stock.astype(np.float32, copy=False)
+    updated_need = need.astype(np.float32, copy=False)
+    updated_recent_sales = recent_sales.astype(np.float32, copy=False)
+    updated_recent_purchases = recent_purchases.astype(np.float32, copy=False)
+    updated_friend_id = friend_id.astype(np.int32, copy=False)
+    updated_friend_activity = friend_activity.astype(np.float32, copy=False)
+    updated_transparency = transparency.astype(np.float32, copy=False)
 
     accepted_mask = accepted_mask.astype(np.bool_, copy=False)
     accepted_quantity = accepted_quantity.astype(np.float32, copy=False)
@@ -141,28 +145,18 @@ def commit_resolved_trades(
         if quantity <= 0.0:
             continue
 
-        updated_stock[proposer, offer_good] -= quantity
-        updated_stock[target, need_good] -= quantity
-
-        proposer_consumed = min(float(updated_need[proposer, need_good]), quantity)
-        updated_need[proposer, need_good] -= proposer_consumed
-        updated_stock[proposer, need_good] += quantity - proposer_consumed
-
-        target_consumed = min(float(updated_need[target, offer_good]), quantity)
-        updated_need[target, offer_good] -= target_consumed
-        updated_stock[target, offer_good] += quantity - target_consumed
-
         updated_recent_sales[proposer, offer_good] += quantity
         updated_recent_purchases[proposer, need_good] += quantity
         updated_recent_sales[target, need_good] += quantity
         updated_recent_purchases[target, offer_good] += quantity
 
-        updated_friend_activity[proposer, friend_slot] += quantity
         transparency_gain = min(0.05, 0.01 * np.log1p(quantity))
-        updated_transparency[proposer, friend_slot, need_good] = min(
-            1.0,
-            updated_transparency[proposer, friend_slot, need_good] + transparency_gain,
-        )
+        if 0 <= friend_slot < updated_friend_activity.shape[1]:
+            updated_friend_activity[proposer, friend_slot] += quantity
+            updated_transparency[proposer, friend_slot, need_good] = min(
+                1.0,
+                updated_transparency[proposer, friend_slot, need_good] + transparency_gain,
+            )
 
         reciprocal_slot = _find_friend_slot(updated_friend_id[target], proposer)
         if reciprocal_slot < 0:
@@ -176,9 +170,6 @@ def commit_resolved_trades(
             1.0,
             updated_transparency[target, reciprocal_slot, offer_good] + transparency_gain,
         )
-
-    updated_stock = np.maximum(updated_stock, 0.0)
-    updated_need = np.maximum(updated_need, 0.0)
 
     return CommittedTradeState(
         stock=updated_stock,

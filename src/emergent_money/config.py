@@ -25,6 +25,8 @@ class SimulationConfig:
     spoilage_rate: float = 0.05
     max_leisure_extra_multiplier: float = 1.0
     leisure_stock_trade_bias: float = 0.35
+    cuda_friend_block: int = 12
+    cuda_goods_block: int = 25
 
     def __post_init__(self) -> None:
         if self.population <= 0:
@@ -59,6 +61,10 @@ class SimulationConfig:
             raise ValueError("max_leisure_extra_multiplier must be non-negative")
         if self.leisure_stock_trade_bias < 0.0:
             raise ValueError("leisure_stock_trade_bias must be non-negative")
+        if self.cuda_friend_block <= 0:
+            raise ValueError("cuda_friend_block must be positive")
+        if self.cuda_goods_block <= 0:
+            raise ValueError("cuda_goods_block must be positive")
 
     @property
     def agent_good_shape(self) -> tuple[int, int]:

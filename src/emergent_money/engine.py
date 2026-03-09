@@ -141,6 +141,9 @@ class SimulationEngine:
         )
 
     def _score_trade_proposals(self, *, allow_stock_trade: bool) -> int:
+        if self.backend.metadata.name == "cuda":
+            return self._score_trade_proposals_blocked(allow_stock_trade=allow_stock_trade)
+
         xp = self.backend.xp
         row_index = xp.arange(self.config.population, dtype=xp.int32)
         best_score = xp.zeros((self.config.population,), dtype=xp.float32)
@@ -209,6 +212,231 @@ class SimulationEngine:
         self.state.trade.proposal_score[...] = best_score
         return int(self.backend.to_scalar(xp.sum(best_score > 0.0)))
 
+    def _score_trade_proposals_blocked(self, *, allow_stock_trade: bool) -> int:
+        if self.backend.metadata.name == "cuda" and hasattr(self.backend, "score_trade_block"):
+            return self._score_trade_proposals_blocked_cuda(allow_stock_trade=allow_stock_trade)
+
+        xp = self.backend.xp
+        population = self.config.population
+        goods = self.config.goods
+        acquaintances = self.config.acquaintances
+        friend_block_size = min(self.config.cuda_friend_block, acquaintances)
+        goods_block_size = min(self.config.cuda_goods_block, goods)
+        initial_transparency = xp.asarray(self.config.initial_transparency, dtype=xp.float32)
+
+        best_score = xp.zeros((population,), dtype=xp.float32)
+        best_friend_slot = xp.full((population,), -1, dtype=xp.int32)
+        best_target_agent = xp.full((population,), -1, dtype=xp.int32)
+        best_need_good = xp.full((population,), -1, dtype=xp.int32)
+        best_offer_good = xp.full((population,), -1, dtype=xp.int32)
+        best_quantity = xp.zeros((population,), dtype=xp.float32)
+
+        self_interest_full = self.state.need
+        if allow_stock_trade:
+            self_interest_full = self_interest_full + xp.maximum(self.state.stock_limit - self.state.stock, 0.0)
+
+        self_stock_full = self.state.stock
+        self_purchase_full = self.state.purchase_price
+        self_sales_full = self.state.sales_price
+
+        for friend_start in range(0, acquaintances, friend_block_size):
+            friend_end = min(friend_start + friend_block_size, acquaintances)
+            local_friend_count = friend_end - friend_start
+            friend_index_block = self.state.friend_id[:, friend_start:friend_end]
+            has_friend = friend_index_block >= 0
+            safe_friend_index = xp.where(has_friend, friend_index_block, 0)
+            friend_stock = self.state.stock[safe_friend_index]
+            friend_need = self.state.need[safe_friend_index]
+            friend_stock_limit = self.state.stock_limit[safe_friend_index]
+            friend_purchase = self.state.purchase_price[safe_friend_index]
+            friend_sales = self.state.sales_price[safe_friend_index]
+            receive_transparency = self.state.transparency[:, friend_start:friend_end, :]
+
+            for need_start in range(0, goods, goods_block_size):
+                need_end = min(need_start + goods_block_size, goods)
+                need_width = need_end - need_start
+                self_interest_need = self_interest_full[:, need_start:need_end]
+                friend_stock_need = friend_stock[:, :, need_start:need_end]
+                self_purchase_need = self_purchase_full[:, need_start:need_end]
+                transparency_need = receive_transparency[:, :, need_start:need_end]
+                friend_sales_need = friend_sales[:, :, need_start:need_end]
+
+                for offer_start in range(0, goods, goods_block_size):
+                    offer_end = min(offer_start + goods_block_size, goods)
+                    offer_width = offer_end - offer_start
+                    self_stock_offer = self_stock_full[:, offer_start:offer_end]
+                    self_sales_offer = self_sales_full[:, offer_start:offer_end]
+                    friend_need_offer = friend_need[:, :, offer_start:offer_end]
+                    friend_purchase_offer = friend_purchase[:, :, offer_start:offer_end]
+                    if allow_stock_trade:
+                        friend_offer_stock_room = xp.maximum(
+                            friend_stock_limit[:, :, offer_start:offer_end] - friend_stock[:, :, offer_start:offer_end],
+                            0.0,
+                        )
+                        friend_interest_offer = friend_need_offer + friend_offer_stock_room
+                    else:
+                        friend_interest_offer = friend_need_offer
+
+                    quantity = xp.minimum(self_interest_need[:, None, :, None], self_stock_offer[:, None, None, :])
+                    quantity = xp.minimum(quantity, friend_stock_need[:, :, :, None])
+                    quantity = xp.minimum(quantity, friend_interest_offer[:, :, None, :])
+
+                    friend_term = (
+                        friend_purchase_offer[:, :, None, :] / xp.maximum(friend_sales_need[:, :, :, None], 1e-6)
+                    ) * transparency_need[:, :, :, None]
+                    self_term = self_sales_offer[:, None, None, :] / xp.maximum(
+                        self_purchase_need[:, None, :, None] * initial_transparency,
+                        1e-6,
+                    )
+                    exchange_index = friend_term - self_term
+                    valid = has_friend[:, :, None, None] & (quantity > 0.0) & (exchange_index > 0.0)
+
+                    if need_start < offer_end and offer_start < need_end:
+                        need_idx = xp.arange(need_start, need_end, dtype=xp.int32)
+                        offer_idx = xp.arange(offer_start, offer_end, dtype=xp.int32)
+                        diagonal = need_idx[:, None] == offer_idx[None, :]
+                        valid = valid & (~diagonal[None, None, :, :])
+
+                    score = xp.where(valid, quantity * exchange_index, 0.0)
+                    flat_width = local_friend_count * need_width * offer_width
+                    flat_score = score.reshape(population, flat_width)
+                    block_best_score = xp.max(flat_score, axis=1)
+                    block_best_index = xp.argmax(flat_score, axis=1)
+                    flat_quantity = quantity.reshape(population, flat_width)
+                    block_best_quantity = xp.take_along_axis(flat_quantity, block_best_index[:, None], axis=1).reshape(-1)
+
+                    local_friend = (block_best_index // (need_width * offer_width)).astype(xp.int32)
+                    local_remainder = block_best_index % (need_width * offer_width)
+                    local_need = (local_remainder // offer_width).astype(xp.int32)
+                    local_offer = (local_remainder % offer_width).astype(xp.int32)
+
+                    block_friend_slot = friend_start + local_friend
+                    block_target_agent = xp.take_along_axis(friend_index_block, local_friend[:, None], axis=1).reshape(-1)
+                    block_need_good = need_start + local_need
+                    block_offer_good = offer_start + local_offer
+
+                    better = block_best_score > best_score
+                    best_score = xp.where(better, block_best_score, best_score)
+                    best_friend_slot = xp.where(better, block_friend_slot, best_friend_slot)
+                    best_target_agent = xp.where(better, block_target_agent, best_target_agent)
+                    best_need_good = xp.where(better, block_need_good, best_need_good)
+                    best_offer_good = xp.where(better, block_offer_good, best_offer_good)
+                    best_quantity = xp.where(better, block_best_quantity, best_quantity)
+
+        self.state.trade.proposal_friend_slot[...] = best_friend_slot
+        self.state.trade.proposal_target_agent[...] = best_target_agent
+        self.state.trade.proposal_need_good[...] = best_need_good
+        self.state.trade.proposal_offer_good[...] = best_offer_good
+        self.state.trade.proposal_quantity[...] = best_quantity
+        self.state.trade.proposal_score[...] = best_score
+        return int(self.backend.to_scalar(xp.sum(best_score > 0.0)))
+
+    def _score_trade_proposals_blocked_cuda(self, *, allow_stock_trade: bool) -> int:
+        xp = self.backend.xp
+        population = self.config.population
+        goods = self.config.goods
+        acquaintances = self.config.acquaintances
+        friend_block_size = min(self.config.cuda_friend_block, acquaintances)
+        goods_block_size = min(self.config.cuda_goods_block, goods)
+
+        best_score = xp.zeros((population,), dtype=xp.float32)
+        best_friend_slot = xp.full((population,), -1, dtype=xp.int32)
+        best_target_agent = xp.full((population,), -1, dtype=xp.int32)
+        best_need_good = xp.full((population,), -1, dtype=xp.int32)
+        best_offer_good = xp.full((population,), -1, dtype=xp.int32)
+        best_quantity = xp.zeros((population,), dtype=xp.float32)
+
+        self_interest_full = self.state.need
+        if allow_stock_trade:
+            self_interest_full = self_interest_full + xp.maximum(self.state.stock_limit - self.state.stock, 0.0)
+
+        self_stock_full = self.state.stock
+        self_purchase_full = self.state.purchase_price
+        self_sales_full = self.state.sales_price
+
+        need_blocks: list[tuple[int, int, object, object]] = []
+        for need_start in range(0, goods, goods_block_size):
+            need_end = min(need_start + goods_block_size, goods)
+            need_blocks.append(
+                (
+                    need_start,
+                    need_end,
+                    xp.ascontiguousarray(self_interest_full[:, need_start:need_end]),
+                    xp.ascontiguousarray(self_purchase_full[:, need_start:need_end]),
+                )
+            )
+
+        offer_blocks: list[tuple[int, int, object, object]] = []
+        for offer_start in range(0, goods, goods_block_size):
+            offer_end = min(offer_start + goods_block_size, goods)
+            offer_blocks.append(
+                (
+                    offer_start,
+                    offer_end,
+                    xp.ascontiguousarray(self_stock_full[:, offer_start:offer_end]),
+                    xp.ascontiguousarray(self_sales_full[:, offer_start:offer_end]),
+                )
+            )
+
+        for friend_start in range(0, acquaintances, friend_block_size):
+            friend_end = min(friend_start + friend_block_size, acquaintances)
+            friend_index_block = xp.ascontiguousarray(self.state.friend_id[:, friend_start:friend_end])
+            safe_friend_index = xp.where(friend_index_block >= 0, friend_index_block, 0)
+            friend_stock = self.state.stock[safe_friend_index]
+            friend_need = self.state.need[safe_friend_index]
+            friend_stock_limit = self.state.stock_limit[safe_friend_index]
+            friend_purchase = self.state.purchase_price[safe_friend_index]
+            friend_sales = self.state.sales_price[safe_friend_index]
+            receive_transparency = self.state.transparency[:, friend_start:friend_end, :]
+
+            for need_start, need_end, self_interest_need, self_purchase_need in need_blocks:
+                friend_stock_need = xp.ascontiguousarray(friend_stock[:, :, need_start:need_end])
+                transparency_need = xp.ascontiguousarray(receive_transparency[:, :, need_start:need_end])
+                friend_sales_need = xp.ascontiguousarray(friend_sales[:, :, need_start:need_end])
+
+                for offer_start, offer_end, self_stock_offer, self_sales_offer in offer_blocks:
+                    friend_need_offer = friend_need[:, :, offer_start:offer_end]
+                    friend_purchase_offer = xp.ascontiguousarray(friend_purchase[:, :, offer_start:offer_end])
+                    if allow_stock_trade:
+                        friend_offer_stock_room = xp.maximum(
+                            friend_stock_limit[:, :, offer_start:offer_end] - friend_stock[:, :, offer_start:offer_end],
+                            0.0,
+                        )
+                        friend_interest_offer = xp.ascontiguousarray(friend_need_offer + friend_offer_stock_room)
+                    else:
+                        friend_interest_offer = xp.ascontiguousarray(friend_need_offer)
+
+                    self.backend.score_trade_block(
+                        friend_start=friend_start,
+                        need_start=need_start,
+                        offer_start=offer_start,
+                        friend_index_block=friend_index_block,
+                        self_interest_need=self_interest_need,
+                        self_stock_offer=self_stock_offer,
+                        self_purchase_need=self_purchase_need,
+                        self_sales_offer=self_sales_offer,
+                        friend_stock_need=friend_stock_need,
+                        friend_interest_offer=friend_interest_offer,
+                        friend_purchase_offer=friend_purchase_offer,
+                        friend_sales_need=friend_sales_need,
+                        transparency_need=transparency_need,
+                        best_score=best_score,
+                        best_friend_slot=best_friend_slot,
+                        best_target_agent=best_target_agent,
+                        best_need_good=best_need_good,
+                        best_offer_good=best_offer_good,
+                        best_quantity=best_quantity,
+                        initial_transparency=self.config.initial_transparency,
+                    )
+
+        self.state.trade.proposal_friend_slot[...] = best_friend_slot
+        self.state.trade.proposal_target_agent[...] = best_target_agent
+        self.state.trade.proposal_need_good[...] = best_need_good
+        self.state.trade.proposal_offer_good[...] = best_offer_good
+        self.state.trade.proposal_quantity[...] = best_quantity
+        self.state.trade.proposal_score[...] = best_score
+        return int(self.backend.to_scalar(xp.sum(best_score > 0.0)))
+
     def _commit_trades(self) -> tuple[int, float]:
         resolved = self.backend.resolve_trade_proposals(
             stock=self.state.stock,
@@ -229,12 +457,15 @@ class SimulationEngine:
         accepted_count = int(np.count_nonzero(accepted_mask))
         accepted_volume = float(accepted_quantity[accepted_mask].sum()) if accepted_count else 0.0
 
+        self.state.stock = resolved.stock
+        self.state.need = resolved.need
+
         if accepted_count == 0:
             return 0, 0.0
 
         committed = self.backend.commit_resolved_trades(
-            stock=self.state.stock,
-            need=self.state.need,
+            stock=resolved.stock,
+            need=resolved.need,
             recent_sales=self.state.recent_sales,
             recent_purchases=self.state.recent_purchases,
             friend_id=self.state.friend_id,
@@ -249,91 +480,30 @@ class SimulationEngine:
             initial_transparency=self.config.initial_transparency,
         )
 
-        self.state.stock[...] = committed.stock
-        self.state.need[...] = committed.need
-        self.state.recent_sales[...] = committed.recent_sales
-        self.state.recent_purchases[...] = committed.recent_purchases
-        self.state.friend_activity[...] = committed.friend_activity
-        self.state.friend_id[...] = committed.friend_id
-        self.state.transparency[...] = committed.transparency
+        self.state.stock = committed.stock
+        self.state.need = committed.need
+        self.state.recent_sales = committed.recent_sales
+        self.state.recent_purchases = committed.recent_purchases
+        self.state.friend_activity = committed.friend_activity
+        self.state.friend_id = committed.friend_id
+        self.state.transparency = committed.transparency
         return accepted_count, accepted_volume
 
     def _introduce_random_contacts(self) -> None:
-        friend_id = self.backend.to_numpy(self.state.friend_id).astype(np.int32, copy=True)
-        friend_activity = self.backend.to_numpy(self.state.friend_activity).astype(np.float32, copy=True)
-        transparency = self.backend.to_numpy(self.state.transparency).astype(np.float32, copy=True)
+        candidate_ids = self.backend.plan_contact_candidates(
+            friend_id=self.state.friend_id,
+            seed=self.config.seed + 1,
+            cycle=self.cycle,
+        )
+        self.backend.apply_contact_candidates(
+            friend_id=self.state.friend_id,
+            friend_activity=self.state.friend_activity,
+            transparency=self.state.transparency,
+            candidate_ids=candidate_ids,
+            initial_activity=2.0,
+            initial_transparency=self.config.initial_transparency,
+        )
 
-        for agent_id in range(self.config.population):
-            self._assign_friend_candidate(
-                friend_id=friend_id,
-                friend_activity=friend_activity,
-                transparency=transparency,
-                agent_id=agent_id,
-                suggested_id=None,
-                initial_activity=2.0,
-            )
-
-        self.state.friend_id[...] = self.backend.asarray(friend_id, dtype=np.int32)
-        self.state.friend_activity[...] = self.backend.asarray(friend_activity, dtype=np.float32)
-        self.state.transparency[...] = self.backend.asarray(transparency, dtype=np.float32)
-
-    def _assign_friend_candidate(
-        self,
-        *,
-        friend_id: np.ndarray,
-        friend_activity: np.ndarray,
-        transparency: np.ndarray,
-        agent_id: int,
-        suggested_id: int | None,
-        initial_activity: float,
-    ) -> int:
-        candidate_id = suggested_id
-        if candidate_id is None:
-            candidate_id = self._pick_random_candidate(agent_id=agent_id, current_friends=friend_id[agent_id])
-        if candidate_id is None:
-            return -1
-
-        existing_slot = self._find_friend_slot(friend_id[agent_id], candidate_id)
-        if existing_slot >= 0:
-            friend_activity[agent_id, existing_slot] = max(friend_activity[agent_id, existing_slot], initial_activity)
-            return existing_slot
-
-        target_slot = self._select_friend_slot(friend_id[agent_id], friend_activity[agent_id])
-        if target_slot < 0:
-            return -1
-
-        friend_id[agent_id, target_slot] = candidate_id
-        friend_activity[agent_id, target_slot] = initial_activity
-        transparency[agent_id, target_slot, :] = self.config.initial_transparency
-        return target_slot
-
-    def _pick_random_candidate(self, *, agent_id: int, current_friends: np.ndarray) -> int | None:
-        if self.config.population <= 1:
-            return None
-
-        known = {int(friend) for friend in current_friends.tolist() if int(friend) >= 0}
-        known.add(agent_id)
-        if len(known) >= self.config.population:
-            return None
-
-        max_attempts = max(2 * self.config.acquaintances, 8)
-        for _ in range(max_attempts):
-            candidate = int(self._network_rng.integers(0, self.config.population - 1))
-            if candidate >= agent_id:
-                candidate += 1
-            if candidate not in known:
-                return candidate
-
-        for candidate in range(self.config.population):
-            if candidate not in known:
-                return candidate
-        return None
-
-    def _select_friend_slot(self, friend_row: np.ndarray, activity_row: np.ndarray) -> int:
-        empty_slots = np.flatnonzero(friend_row < 0)
-        if empty_slots.size > 0:
-            return int(empty_slots[0])
-        return int(np.argmin(activity_row))
 
     def _apply_leisure_demand(self) -> bool:
         xp = self.backend.xp
@@ -474,3 +644,4 @@ class SimulationEngine:
 
         self.state.purchase_price = xp.maximum(purchase_price, 0.05)
         self.state.sales_price = xp.maximum(sales_price, 0.05)
+

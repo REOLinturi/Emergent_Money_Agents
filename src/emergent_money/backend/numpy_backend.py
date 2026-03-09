@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import numpy as np
 
+from ..contact_update import apply_contact_candidates_in_place
 from ..trade_resolution import CommittedTradeState, ResolvedTrades, commit_resolved_trades, resolve_trade_proposals
 from .base import BaseBackend
 
@@ -65,5 +66,24 @@ class NumPyBackend(BaseBackend):
             proposal_offer_good=proposal_offer_good,
             accepted_mask=accepted_mask,
             accepted_quantity=accepted_quantity,
+            initial_transparency=initial_transparency,
+        )
+
+    def apply_contact_candidates(
+        self,
+        *,
+        friend_id,
+        friend_activity,
+        transparency,
+        candidate_ids,
+        initial_activity: float,
+        initial_transparency: float,
+    ) -> None:
+        apply_contact_candidates_in_place(
+            friend_id=friend_id,
+            friend_activity=friend_activity,
+            transparency=transparency,
+            candidate_ids=candidate_ids,
+            initial_activity=initial_activity,
             initial_transparency=initial_transparency,
         )

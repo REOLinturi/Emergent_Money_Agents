@@ -17,6 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-acquaintances", type=int, default=8)
     parser.add_argument("--demand-candidates", type=int, default=4)
     parser.add_argument("--supply-candidates", type=int, default=4)
+    parser.add_argument("--cuda-friend-block", type=int, default=12)
+    parser.add_argument("--cuda-goods-block", type=int, default=25)
     parser.add_argument("--seed", type=int, default=2009)
     return parser
 
@@ -32,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         active_acquaintances=args.active_acquaintances,
         demand_candidates=args.demand_candidates,
         supply_candidates=args.supply_candidates,
+        cuda_friend_block=args.cuda_friend_block,
+        cuda_goods_block=args.cuda_goods_block,
         seed=args.seed,
     )
     engine = SimulationEngine.create(config=config, backend_name=args.backend)

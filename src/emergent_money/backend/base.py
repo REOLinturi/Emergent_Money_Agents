@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from ..contact_update import apply_contact_candidates_in_place, plan_contact_candidates
 from ..trade_resolution import CommittedTradeState, ResolvedTrades, commit_resolved_trades, resolve_trade_proposals
 
 
@@ -74,6 +75,8 @@ class BaseBackend:
         return ResolvedTrades(
             accepted_mask=self.asarray(resolved.accepted_mask, dtype=np.bool_),
             accepted_quantity=self.asarray(resolved.accepted_quantity, dtype=np.float32),
+            stock=self.asarray(resolved.stock, dtype=np.float32),
+            need=self.asarray(resolved.need, dtype=np.float32),
         )
 
     def commit_resolved_trades(
@@ -119,6 +122,42 @@ class BaseBackend:
             friend_activity=self.asarray(committed.friend_activity, dtype=np.float32),
             transparency=self.asarray(committed.transparency, dtype=np.float32),
         )
+
+    def plan_contact_candidates(self, *, friend_id: Any, seed: int, cycle: int) -> Any:
+        planned = plan_contact_candidates(
+            friend_id=self.to_numpy(friend_id).astype(np.int32, copy=False),
+            seed=seed,
+            cycle=cycle,
+        )
+        return self.asarray(planned, dtype=np.int32)
+
+    def apply_contact_candidates(
+        self,
+        *,
+        friend_id: Any,
+        friend_activity: Any,
+        transparency: Any,
+        candidate_ids: Any,
+        initial_activity: float,
+        initial_transparency: float,
+    ) -> None:
+        updated_friend_id = self.to_numpy(friend_id).astype(np.int32, copy=True)
+        updated_friend_activity = self.to_numpy(friend_activity).astype(np.float32, copy=True)
+        updated_transparency = self.to_numpy(transparency).astype(np.float32, copy=True)
+        candidate_ids_np = self.to_numpy(candidate_ids).astype(np.int32, copy=False)
+
+        apply_contact_candidates_in_place(
+            friend_id=updated_friend_id,
+            friend_activity=updated_friend_activity,
+            transparency=updated_transparency,
+            candidate_ids=candidate_ids_np,
+            initial_activity=initial_activity,
+            initial_transparency=initial_transparency,
+        )
+
+        friend_id[...] = self.asarray(updated_friend_id, dtype=np.int32)
+        friend_activity[...] = self.asarray(updated_friend_activity, dtype=np.float32)
+        transparency[...] = self.asarray(updated_transparency, dtype=np.float32)
 
     def to_numpy(self, value: Any) -> np.ndarray:
         return np.asarray(value)
