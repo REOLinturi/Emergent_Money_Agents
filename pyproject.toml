@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emergent-money"
+version = "0.1.0"
+description = "GPU-first scaffold for the Emergent Money simulation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+perf = [
+  "numba",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"

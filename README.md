@@ -1,25 +1,64 @@
 # Emergent Money Agents
 
-This repository contains the original implementation of an agent-based economic simulation and the accompanying PDF documentation.
+This repository contains the historical Emergent Money documents together with a new GPU-first Python scaffold for rebuilding the simulation.
 
-## Contents
+## Historical Sources
 
-- `EmergentMoney.pdf` &ndash; Document describing the concepts and rules behind the simulation.
-- `Working_Legacy_Code_Reference.pdf` &ndash; Newly annotated Legacy C source code (code written around 2010) implementing the simulation from the EmergentMoney.PDF. It depends on `stdheaders.h`, which is not included here.
-- `Modernizing the Emergent Money Simulation – Comprehensive Plan.pdf` &ndash; A preliminary plan for modernising the simulation.
-- `LICENSE` &ndash; MIT license covering the repository contents.
+- `EmergentMoney.pdf` - original paper and model description
+- `Working_Legacy_Code_Reference.pdf` - annotated legacy C reference
+- `Modernizing the Emergent Money Simulation - Comprehensive Plan.pdf` - earlier modernization draft
+- `TARGET_10K_PLAN.md` - updated implementation plan for the `10,000 / 30 / 100` target model
+- `ARCHITECTURE.md` - engineering rules, backend choice, and UI/service interfaces
 
-## Purpose of this Repository
+## Current Direction
 
-The legacy C code in Working_Legacy_Code_Reference.pdf is annotated to be in sync with the PDF, and the code has been used to produce the reported results found in *Emergent Money*. Today it serves primarily as a historical reference. We do **not** aim to compile or run this version as-is; instead, both the PDF-report and the annotated C code are used as guidance while rebuilding the simulation with modern tools.
+The new implementation treats the paper-level model as primary and the legacy code as a behavioral reference.
 
-## Modernisation Goals
+The target architecture is:
 
-The upcoming implementation will:
+- array-based
+- backend-aware from day one
+- GPU-first for dense tensor phases
+- validated against a deterministic CPU reference path
+- exposed to UI code only through a service and snapshot boundary
 
-- Be rewritten with a modular structure and a visual user interface.
-- Leverage parallel computing on RTX 3090/4090 GPUs.
-- Provide hooks for experiments in policy, economic games and educational scenarios.
+The current CPU reference path already includes:
 
-As this work progresses, the repository will house the new source code alongside the original files for reference.
+- binary talents with a paper-aligned `+50%` starting advantage
+- a sparse directed acquaintance network that starts empty and grows one explored contact per cycle
+- first-round barter and production for basic needs
+- second-round leisure-driven barter with temporary extra demand
+- exhaustive barter scoring across all known acquaintances and all good pairs in the reference path
+- stock-room-aware barter resolution for profitable inventory trades through a backend-owned resolve and commit contract
+- cycle-level metrics aggregated across both rounds
 
+The active-friend and candidate-good buffers remain in the state for snapshots, debugging, and later CUDA pruning experiments, but they do not define the CPU reference barter semantics.
+
+## Scaffold Layout
+
+- `src/emergent_money/config.py` - scenario and kernel parameters
+- `src/emergent_money/backend/` - backend abstraction plus NumPy and CUDA backends
+- `src/emergent_money/state.py` - device-compatible state containers and barter work buffers
+- `src/emergent_money/initialization.py` - initial tensor creation
+- `src/emergent_money/engine.py` - cycle pipeline scaffold
+- `src/emergent_money/service.py` - in-process service boundary for UI and automation callers
+- `src/emergent_money/dto.py` - host-side snapshot DTOs
+- `tests/` - initial regression tests
+
+## Quick Start
+
+Create a virtual environment, install the package in editable mode, and run a small CPU smoke test.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .[dev]
+python -m emergent_money --cycles 3 --population 128 --goods 12 --acquaintances 24
+python -m pytest
+```
+
+## CUDA Note
+
+The scaffold includes a CUDA backend stub that expects a working CuPy installation, but CuPy is not pinned in `pyproject.toml` because the correct package depends on the target CUDA stack.
+
+Install the matching CuPy package for the target machine before running `--backend cuda`.
