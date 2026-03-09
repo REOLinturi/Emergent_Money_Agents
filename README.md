@@ -62,3 +62,26 @@ python -m pytest
 The scaffold includes a CUDA backend stub that expects a working CuPy installation, but CuPy is not pinned in `pyproject.toml` because the correct package depends on the target CUDA stack.
 
 Install the matching CuPy package for the target machine before running `--backend cuda`.
+
+### Verified Local CUDA Setup
+
+The current workspace has been verified with this Windows setup:
+
+- `cupy-cuda12x`
+- `nvidia-cuda-nvrtc-cu12`
+- `nvidia-cuda-runtime-cu12`
+
+Example local startup flow:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .[dev]
+python -m pip install cupy-cuda12x nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12
+New-Item -ItemType Directory -Force -Path .cupy_cache
+$env:CUPY_CACHE_DIR = "$PWD\\.cupy_cache"
+$env:PYTHONPATH = "src"
+python -m emergent_money --backend cuda --cycles 2 --population 64 --goods 8 --acquaintances 12 --active-acquaintances 4
+```
+
+`CUPY_CACHE_DIR` is especially useful in restricted environments where CuPy cannot write to the default user-profile cache directory.
