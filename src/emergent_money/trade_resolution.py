@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +10,10 @@ import numpy as np
 class ResolvedTrades:
     accepted_mask: Any
     accepted_quantity: Any
+    proposer_need_satisfied: Any
+    proposer_stock_added: Any
+    target_need_satisfied: Any
+    target_stock_added: Any
     stock: Any
     need: Any
 
@@ -20,6 +24,7 @@ class CommittedTradeState:
     need: Any
     recent_sales: Any
     recent_purchases: Any
+    recent_inventory_inflow: Any
     friend_id: Any
     friend_activity: Any
     transparency: Any
@@ -39,6 +44,10 @@ def resolve_trade_proposals(
     proposal_count = score.shape[0]
     accepted_mask = np.zeros((proposal_count,), dtype=np.bool_)
     accepted_quantity = np.zeros((proposal_count,), dtype=np.float32)
+    proposer_need_satisfied = np.zeros((proposal_count,), dtype=np.float32)
+    proposer_stock_added = np.zeros((proposal_count,), dtype=np.float32)
+    target_need_satisfied = np.zeros((proposal_count,), dtype=np.float32)
+    target_stock_added = np.zeros((proposal_count,), dtype=np.float32)
 
     available_stock = stock.astype(np.float32, copy=True)
     remaining_need = need.astype(np.float32, copy=True)
@@ -95,9 +104,18 @@ def resolve_trade_proposals(
         if target_leftover > 0.0:
             available_stock[target, offered_good] += target_leftover
 
+        proposer_need_satisfied[proposer] = proposer_consumed
+        proposer_stock_added[proposer] = proposer_leftover
+        target_need_satisfied[proposer] = target_consumed
+        target_stock_added[proposer] = target_leftover
+
     return ResolvedTrades(
         accepted_mask=accepted_mask,
         accepted_quantity=accepted_quantity,
+        proposer_need_satisfied=proposer_need_satisfied,
+        proposer_stock_added=proposer_stock_added,
+        target_need_satisfied=target_need_satisfied,
+        target_stock_added=target_stock_added,
         stock=available_stock,
         need=remaining_need,
     )
@@ -109,6 +127,7 @@ def commit_resolved_trades(
     need: np.ndarray,
     recent_sales: np.ndarray,
     recent_purchases: np.ndarray,
+    recent_inventory_inflow: np.ndarray,
     friend_id: np.ndarray,
     friend_activity: np.ndarray,
     transparency: np.ndarray,
@@ -118,18 +137,23 @@ def commit_resolved_trades(
     proposal_offer_good: np.ndarray,
     accepted_mask: np.ndarray,
     accepted_quantity: np.ndarray,
+    proposer_stock_added: np.ndarray,
+    target_stock_added: np.ndarray,
     initial_transparency: float,
 ) -> CommittedTradeState:
     updated_stock = stock.astype(np.float32, copy=False)
     updated_need = need.astype(np.float32, copy=False)
     updated_recent_sales = recent_sales.astype(np.float32, copy=False)
     updated_recent_purchases = recent_purchases.astype(np.float32, copy=False)
+    updated_recent_inventory_inflow = recent_inventory_inflow.astype(np.float32, copy=False)
     updated_friend_id = friend_id.astype(np.int32, copy=False)
     updated_friend_activity = friend_activity.astype(np.float32, copy=False)
     updated_transparency = transparency.astype(np.float32, copy=False)
 
     accepted_mask = accepted_mask.astype(np.bool_, copy=False)
     accepted_quantity = accepted_quantity.astype(np.float32, copy=False)
+    proposer_stock_added = proposer_stock_added.astype(np.float32, copy=False)
+    target_stock_added = target_stock_added.astype(np.float32, copy=False)
     proposal_friend_slot = proposal_friend_slot.astype(np.int32, copy=False)
     proposal_target_agent = proposal_target_agent.astype(np.int32, copy=False)
     proposal_need_good = proposal_need_good.astype(np.int32, copy=False)
@@ -149,6 +173,8 @@ def commit_resolved_trades(
         updated_recent_purchases[proposer, need_good] += quantity
         updated_recent_sales[target, need_good] += quantity
         updated_recent_purchases[target, offer_good] += quantity
+        updated_recent_inventory_inflow[proposer, need_good] += float(proposer_stock_added[proposer])
+        updated_recent_inventory_inflow[target, offer_good] += float(target_stock_added[proposer])
 
         transparency_gain = min(0.05, 0.01 * np.log1p(quantity))
         if 0 <= friend_slot < updated_friend_activity.shape[1]:
@@ -176,6 +202,7 @@ def commit_resolved_trades(
         need=updated_need,
         recent_sales=updated_recent_sales,
         recent_purchases=updated_recent_purchases,
+        recent_inventory_inflow=updated_recent_inventory_inflow,
         friend_id=updated_friend_id,
         friend_activity=updated_friend_activity,
         transparency=updated_transparency,

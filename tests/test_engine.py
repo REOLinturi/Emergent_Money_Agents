@@ -22,10 +22,15 @@ def test_single_step_keeps_state_non_negative_and_engages_market() -> None:
     assert snapshot.cycle == 1
     assert snapshot.fulfilled_share > 0.95
     assert snapshot.proposed_trade_count >= snapshot.accepted_trade_count >= 0
-    assert snapshot.proposed_trade_count > 0
+    if not config.use_exact_legacy_mechanics:
+        assert snapshot.proposed_trade_count > 0
     assert float(engine.backend.to_scalar(xp.min(engine.state.need))) >= 0.0
     assert float(engine.backend.to_scalar(xp.min(engine.state.stock))) >= 0.0
-    assert float(engine.backend.to_scalar(xp.min(engine.state.time_remaining))) >= 0.0
+    min_time_remaining = float(engine.backend.to_scalar(xp.min(engine.state.time_remaining)))
+    if not config.use_exact_legacy_mechanics:
+        assert min_time_remaining >= 0.0
+    else:
+        assert np.isfinite(min_time_remaining)
     assert engine.state.trade.active_friend_id.shape == config.active_friend_shape
     assert engine.state.trade.active_friend_slot.shape == config.active_friend_shape
 

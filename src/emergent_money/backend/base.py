@@ -75,6 +75,10 @@ class BaseBackend:
         return ResolvedTrades(
             accepted_mask=self.asarray(resolved.accepted_mask, dtype=np.bool_),
             accepted_quantity=self.asarray(resolved.accepted_quantity, dtype=np.float32),
+            proposer_need_satisfied=self.asarray(resolved.proposer_need_satisfied, dtype=np.float32),
+            proposer_stock_added=self.asarray(resolved.proposer_stock_added, dtype=np.float32),
+            target_need_satisfied=self.asarray(resolved.target_need_satisfied, dtype=np.float32),
+            target_stock_added=self.asarray(resolved.target_stock_added, dtype=np.float32),
             stock=self.asarray(resolved.stock, dtype=np.float32),
             need=self.asarray(resolved.need, dtype=np.float32),
         )
@@ -86,6 +90,7 @@ class BaseBackend:
         need: Any,
         recent_sales: Any,
         recent_purchases: Any,
+        recent_inventory_inflow: Any,
         friend_id: Any,
         friend_activity: Any,
         transparency: Any,
@@ -95,6 +100,8 @@ class BaseBackend:
         proposal_offer_good: Any,
         accepted_mask: Any,
         accepted_quantity: Any,
+        proposer_stock_added: Any,
+        target_stock_added: Any,
         initial_transparency: float,
     ) -> CommittedTradeState:
         committed = commit_resolved_trades(
@@ -102,6 +109,7 @@ class BaseBackend:
             need=self.to_numpy(need),
             recent_sales=self.to_numpy(recent_sales),
             recent_purchases=self.to_numpy(recent_purchases),
+            recent_inventory_inflow=self.to_numpy(recent_inventory_inflow),
             friend_id=self.to_numpy(friend_id),
             friend_activity=self.to_numpy(friend_activity),
             transparency=self.to_numpy(transparency),
@@ -111,6 +119,8 @@ class BaseBackend:
             proposal_offer_good=self.to_numpy(proposal_offer_good),
             accepted_mask=self.to_numpy(accepted_mask),
             accepted_quantity=self.to_numpy(accepted_quantity),
+            proposer_stock_added=self.to_numpy(proposer_stock_added),
+            target_stock_added=self.to_numpy(target_stock_added),
             initial_transparency=initial_transparency,
         )
         return CommittedTradeState(
@@ -118,6 +128,7 @@ class BaseBackend:
             need=self.asarray(committed.need, dtype=np.float32),
             recent_sales=self.asarray(committed.recent_sales, dtype=np.float32),
             recent_purchases=self.asarray(committed.recent_purchases, dtype=np.float32),
+            recent_inventory_inflow=self.asarray(committed.recent_inventory_inflow, dtype=np.float32),
             friend_id=self.asarray(committed.friend_id, dtype=np.int32),
             friend_activity=self.asarray(committed.friend_activity, dtype=np.float32),
             transparency=self.asarray(committed.transparency, dtype=np.float32),

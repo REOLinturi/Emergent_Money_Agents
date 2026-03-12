@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import numpy as np
 
@@ -41,6 +41,7 @@ class NumPyBackend(BaseBackend):
         need,
         recent_sales,
         recent_purchases,
+        recent_inventory_inflow,
         friend_id,
         friend_activity,
         transparency,
@@ -50,6 +51,8 @@ class NumPyBackend(BaseBackend):
         proposal_offer_good,
         accepted_mask,
         accepted_quantity,
+        proposer_stock_added,
+        target_stock_added,
         initial_transparency: float,
     ) -> CommittedTradeState:
         return commit_resolved_trades(
@@ -57,6 +60,7 @@ class NumPyBackend(BaseBackend):
             need=need,
             recent_sales=recent_sales,
             recent_purchases=recent_purchases,
+            recent_inventory_inflow=recent_inventory_inflow,
             friend_id=friend_id,
             friend_activity=friend_activity,
             transparency=transparency,
@@ -66,6 +70,8 @@ class NumPyBackend(BaseBackend):
             proposal_offer_good=proposal_offer_good,
             accepted_mask=accepted_mask,
             accepted_quantity=accepted_quantity,
+            proposer_stock_added=proposer_stock_added,
+            target_stock_added=target_stock_added,
             initial_transparency=initial_transparency,
         )
 

@@ -2,7 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from .dto import AgentSnapshot, MarketSnapshot, NetworkSlice, RunStatus, TradeProposalView
+from .analytics import analyze_history, compute_good_snapshots
+from .dto import (
+    AgentSnapshot,
+    ExperimentReport,
+    GoodSnapshot,
+    MarketSnapshot,
+    NetworkSlice,
+    PhenomenaSnapshot,
+    RunStatus,
+    TradeProposalView,
+)
 from .engine import SimulationEngine
 
 
@@ -40,6 +50,21 @@ class SimulationService:
         self._is_running = False
         return snapshots
 
+    def run_experiment(self, cycles: int, top_goods: int = 10) -> ExperimentReport:
+        if cycles < 0:
+            raise ValueError("cycles must be non-negative")
+        if cycles > 0:
+            self.step(cycles)
+        history = self.get_history()
+        goods = self.get_goods_snapshot(limit=top_goods)
+        return ExperimentReport(
+            status=self.get_status(),
+            latest_market=self.get_market_snapshot(),
+            history=history,
+            goods=goods,
+            phenomena=analyze_history(self.engine.history, goods),
+        )
+
     def get_status(self) -> RunStatus:
         metadata = self.engine.backend.metadata
         return RunStatus(
@@ -51,7 +76,25 @@ class SimulationService:
         )
 
     def get_market_snapshot(self) -> MarketSnapshot:
+        if self.engine.history:
+            return MarketSnapshot.from_metrics(self.engine.history[-1])
         return MarketSnapshot.from_metrics(self.engine.snapshot_metrics())
+
+    def get_history(self, limit: int | None = None) -> list[MarketSnapshot]:
+        history = self.engine.history if limit is None else self.engine.history[-limit:]
+        return [MarketSnapshot.from_metrics(item) for item in history]
+
+    def get_goods_snapshot(self, limit: int = 12, sort_by: str = "monetary_score") -> list[GoodSnapshot]:
+        return compute_good_snapshots(
+            state=self.engine.state,
+            backend=self.engine.backend,
+            limit=limit,
+            sort_by=sort_by,
+        )
+
+    def get_phenomena_snapshot(self, top_goods: int = 8) -> PhenomenaSnapshot:
+        goods = self.get_goods_snapshot(limit=top_goods)
+        return analyze_history(self.engine.history, goods)
 
     def get_agent_snapshot(self, agent_id: int) -> AgentSnapshot:
         self._validate_agent_id(agent_id)
@@ -67,6 +110,7 @@ class SimulationService:
             efficiency=self._vector(self.engine.state.efficiency[agent_id]),
             purchase_price=self._vector(self.engine.state.purchase_price[agent_id]),
             sales_price=self._vector(self.engine.state.sales_price[agent_id]),
+            recent_inventory_inflow=self._vector(self.engine.state.recent_inventory_inflow[agent_id]),
             active_friends=self._int_vector(self.engine.state.trade.active_friend_id[agent_id]),
             candidate_need_goods=self._int_vector(self.engine.state.trade.candidate_need_good[agent_id]),
             candidate_offer_goods=self._int_vector(self.engine.state.trade.candidate_offer_good[agent_id]),

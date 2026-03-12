@@ -7,3 +7,9 @@ dist/
 build/
 *.pyc
 *.egg-info/
+
+.cargo/
+.rustup/
+runs/
+
+native/legacy_search/target/

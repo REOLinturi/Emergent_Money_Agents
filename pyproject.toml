@@ -19,6 +19,9 @@ dev = [
 perf = [
   "numba",
 ]
+native = [
+  "maturin>=1.7,<2.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -26,7 +29,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"emergent_money" = ["dashboard_page.html"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-asyncio_default_fixture_loop_scope = "function"

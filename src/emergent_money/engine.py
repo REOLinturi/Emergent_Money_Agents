@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from .analytics import compute_monetary_aggregates
 from .backend import create_backend
 from .backend.base import BaseBackend
 from .config import SimulationConfig
 from .initialization import create_initial_state
+from .legacy_cycle import run_legacy_cycle
 from .metrics import MetricsSnapshot, compute_metrics
 from .state import SimulationState
 
@@ -17,34 +19,48 @@ class SimulationEngine:
         self.state = state or create_initial_state(config, backend)
         self.cycle = 0
         self.history: list[MetricsSnapshot] = []
+        self.exact_cycle_diagnostics: dict[str, object] | None = None
         self._cycle_need_total = self._base_need_total()
         self._proposed_trade_count = 0
         self._accepted_trade_count = 0
         self._accepted_trade_volume = 0.0
-        self._network_rng = np.random.default_rng(config.seed + 1)
+        self._production_total = 0.0
+        self._surplus_output_total = 0.0
+        self._stock_consumption_total = 0.0
+        self._leisure_extra_need_total = 0.0
+        self._inventory_trade_volume = 0.0
 
     @classmethod
     def create(cls, config: SimulationConfig | None = None, backend_name: str = "numpy") -> "SimulationEngine":
         resolved_config = config or SimulationConfig()
-        backend = create_backend(backend_name)
+        resolved_backend_name = backend_name
+        if resolved_config.use_exact_legacy_mechanics:
+            resolved_backend_name = "numpy"
+        backend = create_backend(resolved_backend_name)
         state = create_initial_state(resolved_config, backend)
         return cls(config=resolved_config, backend=backend, state=state)
 
     def step(self) -> MetricsSnapshot:
-        self._start_cycle()
-        self._run_basic_round()
-        self._run_leisure_round()
-        self._update_efficiency_from_learning()
-        self._apply_spoilage()
-        self._update_private_values()
+        if self.config.use_exact_legacy_mechanics:
+            run_legacy_cycle(self)
+        else:
+            self._start_cycle()
+            self._run_basic_round()
+            self._run_leisure_round()
+            self._update_efficiency_from_learning()
+            self._apply_spoilage()
+            self._update_private_values()
         self.backend.synchronize()
 
         self.cycle += 1
         snapshot = self.snapshot_metrics()
+        if self.config.use_exact_legacy_mechanics:
+            self.state.market.total_stock_previous = snapshot.stock_total
         self.history.append(snapshot)
         return snapshot
 
     def snapshot_metrics(self) -> MetricsSnapshot:
+        monetary_concentration, rare_goods_monetary_share = compute_monetary_aggregates(self.state, self.backend)
         return compute_metrics(
             cycle=self.cycle,
             state=self.state,
@@ -53,10 +69,23 @@ class SimulationEngine:
             proposed_trade_count=self._proposed_trade_count,
             accepted_trade_count=self._accepted_trade_count,
             accepted_trade_volume=self._accepted_trade_volume,
+            production_total=self._production_total,
+            surplus_output_total=self._surplus_output_total,
+            stock_consumption_total=self._stock_consumption_total,
+            leisure_extra_need_total=self._leisure_extra_need_total,
+            inventory_trade_volume=self._inventory_trade_volume,
+            network_density=self._network_density(),
+            monetary_concentration=monetary_concentration,
+            rare_goods_monetary_share=rare_goods_monetary_share,
         )
 
     def _base_need_total(self) -> float:
         return float(self.backend.to_scalar(self.backend.xp.sum(self.state.base_need)))
+
+    def _network_density(self) -> float:
+        xp = self.backend.xp
+        known_share = xp.mean((self.state.friend_id >= 0).astype(xp.float32))
+        return float(self.backend.to_scalar(known_share))
 
     def _start_cycle(self) -> None:
         self.state.need[...] = self.state.base_need
@@ -65,6 +94,7 @@ class SimulationEngine:
         self.state.recent_production *= self.config.activity_discount
         self.state.recent_sales *= self.config.activity_discount
         self.state.recent_purchases *= self.config.activity_discount
+        self.state.recent_inventory_inflow *= self.config.activity_discount
         self.state.trade.active_friend_slot[...] = -1
         self.state.trade.active_friend_id[...] = -1
         self.state.trade.proposal_friend_slot[...] = -1
@@ -79,6 +109,11 @@ class SimulationEngine:
         self._proposed_trade_count = 0
         self._accepted_trade_count = 0
         self._accepted_trade_volume = 0.0
+        self._production_total = 0.0
+        self._surplus_output_total = 0.0
+        self._stock_consumption_total = 0.0
+        self._leisure_extra_need_total = 0.0
+        self._inventory_trade_volume = 0.0
 
     def _run_basic_round(self) -> None:
         self._run_market_round(allow_stock_trade=False)
@@ -96,14 +131,16 @@ class SimulationEngine:
         self._prepare_trade_frontier()
         self._select_trade_candidates(allow_stock_trade=allow_stock_trade)
         self._proposed_trade_count += self._score_trade_proposals(allow_stock_trade=allow_stock_trade)
-        accepted_count, accepted_volume = self._commit_trades()
+        accepted_count, accepted_volume, inventory_trade_volume = self._commit_trades()
         self._accepted_trade_count += accepted_count
         self._accepted_trade_volume += accepted_volume
+        self._inventory_trade_volume += inventory_trade_volume
         self._produce_for_needs()
 
     def _consume_from_stock(self) -> None:
         xp = self.backend.xp
         consumed = xp.minimum(self.state.need, self.state.stock)
+        self._stock_consumption_total += float(self.backend.to_scalar(xp.sum(consumed)))
         self.state.need -= consumed
         self.state.stock -= consumed
 
@@ -437,7 +474,7 @@ class SimulationEngine:
         self.state.trade.proposal_score[...] = best_score
         return int(self.backend.to_scalar(xp.sum(best_score > 0.0)))
 
-    def _commit_trades(self) -> tuple[int, float]:
+    def _commit_trades(self) -> tuple[int, float, float]:
         resolved = self.backend.resolve_trade_proposals(
             stock=self.state.stock,
             need=self.state.need,
@@ -456,18 +493,24 @@ class SimulationEngine:
         accepted_quantity = self.backend.to_numpy(resolved.accepted_quantity).astype(np.float32, copy=False)
         accepted_count = int(np.count_nonzero(accepted_mask))
         accepted_volume = float(accepted_quantity[accepted_mask].sum()) if accepted_count else 0.0
+        inventory_trade_volume = float(
+            self.backend.to_scalar(
+                self.backend.xp.sum(resolved.proposer_stock_added) + self.backend.xp.sum(resolved.target_stock_added)
+            )
+        )
 
         self.state.stock = resolved.stock
         self.state.need = resolved.need
 
         if accepted_count == 0:
-            return 0, 0.0
+            return 0, 0.0, 0.0
 
         committed = self.backend.commit_resolved_trades(
             stock=resolved.stock,
             need=resolved.need,
             recent_sales=self.state.recent_sales,
             recent_purchases=self.state.recent_purchases,
+            recent_inventory_inflow=self.state.recent_inventory_inflow,
             friend_id=self.state.friend_id,
             friend_activity=self.state.friend_activity,
             transparency=self.state.transparency,
@@ -477,6 +520,8 @@ class SimulationEngine:
             proposal_offer_good=self.state.trade.proposal_offer_good,
             accepted_mask=resolved.accepted_mask,
             accepted_quantity=resolved.accepted_quantity,
+            proposer_stock_added=resolved.proposer_stock_added,
+            target_stock_added=resolved.target_stock_added,
             initial_transparency=self.config.initial_transparency,
         )
 
@@ -484,10 +529,11 @@ class SimulationEngine:
         self.state.need = committed.need
         self.state.recent_sales = committed.recent_sales
         self.state.recent_purchases = committed.recent_purchases
+        self.state.recent_inventory_inflow = committed.recent_inventory_inflow
         self.state.friend_activity = committed.friend_activity
         self.state.friend_id = committed.friend_id
         self.state.transparency = committed.transparency
-        return accepted_count, accepted_volume
+        return accepted_count, accepted_volume, inventory_trade_volume
 
     def _introduce_random_contacts(self) -> None:
         candidate_ids = self.backend.plan_contact_candidates(
@@ -526,6 +572,7 @@ class SimulationEngine:
 
         self.state.need += extra_need
         self._cycle_need_total += extra_need_total
+        self._leisure_extra_need_total += extra_need_total
         return True
 
     def _find_friend_slot(self, friend_row: np.ndarray, agent_id: int) -> int:
@@ -545,6 +592,7 @@ class SimulationEngine:
         produced = self.state.need * scale[:, None]
         time_spent = xp.sum(produced / self.state.efficiency, axis=1)
 
+        self._production_total += float(self.backend.to_scalar(xp.sum(produced)))
         self.state.need -= produced
         self.state.recent_production += produced
         self.state.time_remaining -= time_spent
@@ -564,6 +612,8 @@ class SimulationEngine:
         max_units = self.state.time_remaining * chosen_efficiency
         surplus_units = xp.where(eligible_any, xp.minimum(max_units, chosen_stock_room), 0.0)
 
+        self._production_total += float(self.backend.to_scalar(xp.sum(surplus_units)))
+        self._surplus_output_total += float(self.backend.to_scalar(xp.sum(surplus_units)))
         self.state.stock[row_index, chosen_good] += surplus_units
         self.state.recent_production[row_index, chosen_good] += surplus_units
         self.state.time_remaining -= xp.where(eligible_any, surplus_units / xp.maximum(chosen_efficiency, 1e-6), 0.0)

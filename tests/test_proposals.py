@@ -95,6 +95,7 @@ def test_proposal_scoring_finds_profitable_barter_pair() -> None:
         active_acquaintances=1,
         demand_candidates=1,
         supply_candidates=1,
+        use_exact_legacy_mechanics=False,
     )
     engine = SimulationEngine.create(config=config, backend_name="numpy")
     state = engine.state
@@ -148,6 +149,7 @@ def test_proposal_scoring_ignores_snapshot_candidate_buffers() -> None:
         active_acquaintances=1,
         demand_candidates=1,
         supply_candidates=1,
+        use_exact_legacy_mechanics=False,
     )
     engine = SimulationEngine.create(config=config, backend_name="numpy")
     state = engine.state
@@ -198,6 +200,7 @@ def test_blocked_proposal_scoring_matches_reference_loop() -> None:
         supply_candidates=2,
         cuda_friend_block=1,
         cuda_goods_block=2,
+        use_exact_legacy_mechanics=False,
     )
     engine = SimulationEngine.create(config=config, backend_name="numpy")
     _seed_proposal_fixture(engine)
@@ -239,6 +242,7 @@ def test_cuda_proposal_scoring_matches_numpy_reference() -> None:
         supply_candidates=2,
         cuda_friend_block=1,
         cuda_goods_block=2,
+        use_exact_legacy_mechanics=False,
     )
     numpy_engine = SimulationEngine.create(config=config, backend_name="numpy")
     cuda_engine = SimulationEngine.create(config=config, backend_name="cuda")
@@ -283,6 +287,7 @@ def test_commit_executes_single_barter_without_double_counting() -> None:
         active_acquaintances=1,
         demand_candidates=1,
         supply_candidates=1,
+        use_exact_legacy_mechanics=False,
     )
     engine = SimulationEngine.create(config=config, backend_name="numpy")
     state = engine.state
@@ -316,10 +321,11 @@ def test_commit_executes_single_barter_without_double_counting() -> None:
     engine._prepare_trade_frontier()
     engine._select_trade_candidates(allow_stock_trade=False)
     engine._score_trade_proposals(allow_stock_trade=False)
-    accepted_count, accepted_volume = engine._commit_trades()
+    accepted_count, accepted_volume, inventory_trade_volume = engine._commit_trades()
 
     assert accepted_count == 1
     assert accepted_volume == 4.0
+    assert inventory_trade_volume == 0.0
     assert bool(engine.backend.to_scalar(state.trade.accepted_mask[0])) is True
     assert bool(engine.backend.to_scalar(state.trade.accepted_mask[1])) is False
     assert float(engine.backend.to_scalar(state.trade.accepted_quantity[0])) == 4.0
@@ -339,6 +345,7 @@ def test_stock_trade_round_can_exchange_for_inventory_room() -> None:
         active_acquaintances=1,
         demand_candidates=1,
         supply_candidates=1,
+        use_exact_legacy_mechanics=False,
     )
     engine = SimulationEngine.create(config=config, backend_name="numpy")
     state = engine.state

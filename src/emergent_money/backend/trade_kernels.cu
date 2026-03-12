@@ -13,6 +13,10 @@ void resolve_trade_proposals_kernel(
     const int goods,
     unsigned char* accepted_mask,
     float* accepted_quantity,
+    float* proposer_need_satisfied,
+    float* proposer_stock_added,
+    float* target_need_satisfied,
+    float* target_stock_added,
     float* working_stock,
     float* working_need
 ) {
@@ -82,6 +86,11 @@ void resolve_trade_proposals_kernel(
         if (target_leftover > 0.0f) {
             working_stock[target_offer_idx] += target_leftover;
         }
+
+        proposer_need_satisfied[proposer] = proposer_consumed;
+        proposer_stock_added[proposer] = proposer_leftover;
+        target_need_satisfied[proposer] = target_consumed;
+        target_stock_added[proposer] = target_leftover;
     }
 }
 
@@ -174,9 +183,12 @@ void commit_resolved_trades_kernel(
     const int* proposal_offer_good,
     const unsigned char* accepted_mask,
     const float* accepted_quantity,
+    const float* proposer_stock_added,
+    const float* target_stock_added,
     const float initial_transparency,
     float* updated_recent_sales,
     float* updated_recent_purchases,
+    float* updated_recent_inventory_inflow,
     int* updated_friend_id,
     float* updated_friend_activity,
     float* updated_transparency
@@ -209,6 +221,8 @@ void commit_resolved_trades_kernel(
         updated_recent_purchases[proposer_need_idx] += quantity;
         updated_recent_sales[target_need_idx] += quantity;
         updated_recent_purchases[target_offer_idx] += quantity;
+        updated_recent_inventory_inflow[proposer_need_idx] += proposer_stock_added[proposer];
+        updated_recent_inventory_inflow[target_offer_idx] += target_stock_added[proposer];
 
         const float transparency_gain = fminf(0.05f, 0.01f * log1pf(quantity));
 

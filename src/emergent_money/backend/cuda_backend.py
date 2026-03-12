@@ -81,6 +81,10 @@ class CudaBackend(BaseBackend):
         sorted_proposers = self._sorted_proposers(score)
         accepted_mask = self.xp.zeros((proposal_count,), dtype=self.xp.uint8)
         accepted_quantity = self.xp.zeros((proposal_count,), dtype=self.xp.float32)
+        proposer_need_satisfied = self.xp.zeros((proposal_count,), dtype=self.xp.float32)
+        proposer_stock_added = self.xp.zeros((proposal_count,), dtype=self.xp.float32)
+        target_need_satisfied = self.xp.zeros((proposal_count,), dtype=self.xp.float32)
+        target_stock_added = self.xp.zeros((proposal_count,), dtype=self.xp.float32)
         working_stock = self.xp.array(stock, copy=True)
         working_need = self.xp.array(need, copy=True)
 
@@ -101,6 +105,10 @@ class CudaBackend(BaseBackend):
                 np.int32(stock.shape[1]),
                 accepted_mask,
                 accepted_quantity,
+                proposer_need_satisfied,
+                proposer_stock_added,
+                target_need_satisfied,
+                target_stock_added,
                 working_stock,
                 working_need,
             ),
@@ -108,6 +116,10 @@ class CudaBackend(BaseBackend):
         return ResolvedTrades(
             accepted_mask=accepted_mask.astype(self.xp.bool_),
             accepted_quantity=accepted_quantity,
+            proposer_need_satisfied=proposer_need_satisfied,
+            proposer_stock_added=proposer_stock_added,
+            target_need_satisfied=target_need_satisfied,
+            target_stock_added=target_stock_added,
             stock=working_stock,
             need=working_need,
         )
@@ -119,6 +131,7 @@ class CudaBackend(BaseBackend):
         need,
         recent_sales,
         recent_purchases,
+        recent_inventory_inflow,
         friend_id,
         friend_activity,
         transparency,
@@ -128,6 +141,8 @@ class CudaBackend(BaseBackend):
         proposal_offer_good,
         accepted_mask,
         accepted_quantity,
+        proposer_stock_added,
+        target_stock_added,
         initial_transparency: float,
     ) -> CommittedTradeState:  # pragma: no cover - depends on CUDA runtime
         accepted_mask_u8 = accepted_mask.astype(self.xp.uint8, copy=False)
@@ -145,9 +160,12 @@ class CudaBackend(BaseBackend):
                 proposal_offer_good,
                 accepted_mask_u8,
                 accepted_quantity,
+                proposer_stock_added,
+                target_stock_added,
                 np.float32(initial_transparency),
                 recent_sales,
                 recent_purchases,
+                recent_inventory_inflow,
                 friend_id,
                 friend_activity,
                 transparency,
@@ -158,6 +176,7 @@ class CudaBackend(BaseBackend):
             need=need,
             recent_sales=recent_sales,
             recent_purchases=recent_purchases,
+            recent_inventory_inflow=recent_inventory_inflow,
             friend_id=friend_id,
             friend_activity=friend_activity,
             transparency=transparency,

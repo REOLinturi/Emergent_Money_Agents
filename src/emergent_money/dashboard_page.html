@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Emergent Money Dashboard</title>
+  <style>
+    :root {
+      --bg: #efe3cb;
+      --panel: rgba(255, 250, 240, 0.9);
+      --ink: #213128;
+      --muted: rgba(33, 49, 40, 0.66);
+      --accent: #185f49;
+      --warm: #aa5b32;
+      --rare: #844719;
+      --line: rgba(33, 49, 40, 0.12);
+      --shadow: 0 24px 60px rgba(74, 53, 31, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(255,255,255,0.6), transparent 32%),
+        linear-gradient(135deg, #f5edd9 0%, #e5d5b4 60%, #dac7a6 100%);
+      font-family: "Palatino Linotype", Georgia, serif;
+    }
+    .shell {
+      width: min(1400px, calc(100vw - 28px));
+      margin: 16px auto 28px;
+      display: grid;
+      gap: 16px;
+      animation: fade 420ms ease-out;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.6);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+    .hero {
+      padding: 24px 26px;
+      display: grid;
+      gap: 12px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -60px;
+      bottom: -80px;
+      width: 260px;
+      height: 260px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(24,95,73,0.16), transparent 65%);
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 {
+      font-size: clamp(2rem, 4vw, 3.1rem);
+      line-height: 0.94;
+      letter-spacing: -0.05em;
+      max-width: 13ch;
+    }
+    .small { color: var(--muted); line-height: 1.45; }
+    .meta, .legend { display: flex; flex-wrap: wrap; gap: 10px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.76);
+      border: 1px solid rgba(24,95,73,0.12);
+      font-family: Consolas, "Lucida Console", monospace;
+      font-size: 0.84rem;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--warm);
+      box-shadow: 0 0 0 0 rgba(170,91,50,0.25);
+    }
+    .dot.running {
+      background: var(--accent);
+      animation: pulse 1.2s ease-out infinite;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(290px, 350px) minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .panel {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+    .controls { position: sticky; top: 16px; }
+    .field-grid, .metrics, .phenomena {
+      display: grid;
+      gap: 12px;
+    }
+    .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .phenomena { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 0.82rem; }
+    input, select, button {
+      font: inherit;
+      border-radius: 12px;
+    }
+    input, select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid rgba(33,49,40,0.12);
+      background: rgba(255,255,255,0.82);
+      font-family: Consolas, "Lucida Console", monospace;
+      font-size: 0.9rem;
+      color: var(--ink);
+    }
+    .buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    button {
+      padding: 11px 14px;
+      border: 0;
+      cursor: pointer;
+      font-weight: 600;
+      transition: transform 140ms ease, filter 140ms ease;
+    }
+    button:hover { transform: translateY(-1px); filter: saturate(1.05); }
+    .primary { background: var(--accent); color: #f9f7ef; }
+    .secondary { background: rgba(24,95,73,0.12); color: var(--ink); }
+    .warm { background: rgba(170,91,50,0.18); color: #612d13; }
+    .card, .chart-card {
+      padding: 15px;
+      border-radius: 18px;
+      border: 1px solid rgba(33,49,40,0.08);
+      background: rgba(255,255,255,0.74);
+    }
+    .card .k {
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .card .v {
+      font-size: clamp(1.2rem, 2.4vw, 1.9rem);
+      line-height: 1;
+      letter-spacing: -0.05em;
+      margin-top: 6px;
+    }
+    .mono { font-family: Consolas, "Lucida Console", monospace; }
+    canvas {
+      width: 100%;
+      height: 240px;
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.55), rgba(255,255,255,0.16));
+      border: 1px solid rgba(33,49,40,0.08);
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+    th { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    tr.rare { background: rgba(132,71,25,0.08); }
+    .error {
+      display: none;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(170,91,50,0.12);
+      border: 1px solid rgba(170,91,50,0.18);
+      color: #612d13;
+      font-family: Consolas, "Lucida Console", monospace;
+      font-size: 0.82rem;
+    }
+    .error.visible { display: block; }
+    @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    @keyframes pulse { from { box-shadow: 0 0 0 0 rgba(24,95,73,0.25); } to { box-shadow: 0 0 0 14px rgba(24,95,73,0); } }
+    @media (max-width: 1180px) {
+      .layout, .charts { grid-template-columns: 1fr; }
+      .controls { position: static; }
+    }
+    @media (max-width: 720px) {
+      .shell { width: min(100vw - 16px, 100%); margin: 8px auto 20px; }
+      .field-grid, .buttons, .metrics, .phenomena { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Emergent Money live cockpit</h1>
+      <p class="small">Track utility, production, barter, and whether low-demand goods are slowly taking monetary roles. Reset model size live through the service boundary.</p>
+      <div class="meta">
+        <div class="pill"><span id="dot" class="dot"></span><span id="runState">Idle</span></div>
+        <div class="pill">cycle <span id="cycleMeta">0</span></div>
+        <div class="pill">backend <span id="backendMeta">numpy</span></div>
+        <div class="pill">batch <span id="batchMeta">1</span></div>
+      </div>
+    </section>
+    <div class="layout">
+      <aside class="panel controls">
+        <div>
+          <h2>Run control</h2>
+          <p class="small">Reset parameters when changing model size. Polling uses snapshots only.</p>
+        </div>
+        <div id="errorBox" class="error"></div>
+        <div class="field-grid">
+          <label>Backend<select id="backend"><option value="numpy">numpy</option><option value="cuda">cuda</option></select></label>
+          <label>Batch cycles<input id="batchCycles" type="number" min="1" step="1" value="1"></label>
+          <label>Population<input id="population" type="number" min="2" step="1" value="256"></label>
+          <label>Goods<input id="goods" type="number" min="2" step="1" value="12"></label>
+          <label>Acquaintances<input id="acquaintances" type="number" min="1" step="1" value="24"></label>
+          <label>Active acquaintances<input id="activeAcquaintances" type="number" min="1" step="1" value="8"></label>
+          <label>Demand candidates<input id="demandCandidates" type="number" min="1" step="1" value="4"></label>
+          <label>Supply candidates<input id="supplyCandidates" type="number" min="1" step="1" value="4"></label>
+          <label>Seed<input id="seed" type="number" step="1" value="2009"></label>
+          <label>Step cycles<input id="stepCycles" type="number" min="1" step="1" value="10"></label>
+        </div>
+        <div class="buttons">
+          <button id="startBtn" class="primary">Start</button>
+          <button id="pauseBtn" class="warm">Pause</button>
+          <button id="stepBtn" class="secondary">Step</button>
+          <button id="resetBtn" class="secondary">Reset</button>
+        </div>
+      </aside>
+      <main class="panel">
+        <div id="metrics" class="metrics"></div>
+        <section>
+          <h2>Phenomena watch</h2>
+          <p class="small">Cycle signal comes from trade-volume autocorrelation. Monetary-role metrics track inventory acceptance and breadth.</p>
+          <div id="phenomena" class="phenomena"></div>
+        </section>
+        <section class="charts">
+          <div class="chart-card">
+            <h3>Macro path</h3>
+            <p class="small">Utility proxy and production.</p>
+            <canvas id="macroChart" width="640" height="240"></canvas>
+            <div class="legend small"><span>green utility</span><span>amber production</span></div>
+          </div>
+          <div class="chart-card">
+            <h3>Trade pulse</h3>
+            <p class="small">Accepted and inventory-directed trade volumes.</p>
+            <canvas id="tradeChart" width="640" height="240"></canvas>
+            <div class="legend small"><span>dark trade volume</span><span>soft green inventory trade</span></div>
+          </div>          <div class="chart-card">
+            <h3>Monetary shift</h3>
+            <p class="small">Rare-goods money share and concentration.</p>
+            <canvas id="moneyChart" width="640" height="240"></canvas>
+            <div class="legend small"><span>brown rare-money share</span><span>green concentration</span></div>
+          </div>
+          <div class="chart-card">
+            <h3>Top monetary goods</h3>
+            <p class="small">Warm rows belong to the rare-demand quartile.</p>
+            <canvas id="goodsChart" width="640" height="240"></canvas>
+            <table>
+              <thead>
+                <tr><th>Good</th><th>Demand rank</th><th>Money score</th><th>Breadth</th><th>Inv. share</th></tr>
+              </thead>
+              <tbody id="goodsTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script>
+    const state = { status: null, market: null, history: [], goods: [], phenomena: null };
+    const $ = id => document.getElementById(id);
+    const pct = value => `${((value || 0) * 100).toFixed(1)}%`;
+    const num = value => {
+      const v = Number(value || 0);
+      return Math.abs(v) >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : v.toFixed(2);
+    };
+    const metrics = [
+      ['Cycle', m => String(m.cycle || 0), m => state.status?.backend_name || 'numpy'],
+      ['Fulfilled', m => pct(m.fulfilled_share), m => `unmet ${num(m.unmet_need_total)}`],
+      ['Utility', m => num(m.utility_proxy_total), m => `needs ${num(m.average_needs_level)}`],
+      ['Production', m => num(m.production_total), m => `surplus ${num(m.surplus_output_total)}`],
+      ['Trade volume', m => num(m.accepted_trade_volume), m => `${m.accepted_trade_count || 0} accepted`],
+      ['Inventory trade', m => num(m.inventory_trade_volume), m => `stock use ${num(m.stock_consumption_total)}`],
+      ['TCE waste', m => num(m.tce_cost_in_time_total), m => `raw ${num(m.periodic_tce_cost_total)}`],
+      ['Spoilage', m => num(m.spoilage_cost_in_time_total), m => `raw ${num(m.periodic_spoilage_total)}`],
+      ['Stored delta', m => num(m.stored_delta_total), m => `price ${num(m.price_average)}`],
+      ['Rare-money share', m => pct(m.rare_goods_monetary_share), m => `conc ${pct(m.monetary_concentration)}`],
+      ['Network density', m => pct(m.network_density), m => `history ${state.status?.history_length || 0}`],
+    ];
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        throw new Error(await response.text() || `Request failed: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function refresh() {
+      try {
+        const [status, market, history, goods, phenomena] = await Promise.all([
+          fetchJson('/api/status'),
+          fetchJson('/api/market'),
+          fetchJson('/api/history?limit=240'),
+          fetchJson('/api/goods?limit=10'),
+          fetchJson('/api/phenomena?top_goods=10'),
+        ]);
+        state.status = status;
+        state.market = market;
+        state.history = history;
+        state.goods = goods;
+        state.phenomena = phenomena;
+        render();
+      } catch (error) {
+        showError(error.message || String(error));
+      }
+    }
+
+    function render() {
+      clearError();
+      syncForm();
+      $('dot').classList.toggle('running', Boolean(state.status?.is_running));
+      $('runState').textContent = state.status?.is_running ? 'Running' : 'Idle';
+      $('cycleMeta').textContent = state.status?.cycle ?? 0;
+      $('backendMeta').textContent = state.status?.backend_name ?? 'numpy';
+      $('batchMeta').textContent = state.status?.batch_cycles ?? 1;
+
+      $('metrics').innerHTML = metrics.map(([label, valueFn, detailFn]) => `
+        <article class="card">
+          <div class="k">${label}</div>
+          <div class="v">${valueFn(state.market || {})}</div>
+          <div class="small mono">${detailFn(state.market || {})}</div>
+        </article>
+      `).join('');
+
+      const p = state.phenomena || {};
+      const leaders = (p.top_monetary_good_ids || []).map(id => `g${id}`).join(', ') || 'none';
+      $('phenomena').innerHTML = [
+        ['Economy', p.economy_growing ? 'Growing' : 'Flat or falling', `slope ${num(p.production_trend)}`],
+        ['Utility', p.utility_growing ? 'Growing' : 'Flat or falling', `slope ${num(p.utility_trend)}`],
+        ['Cycles', p.cycles_detected ? 'Detected' : 'Weak', p.dominant_cycle_length ? `period ${p.dominant_cycle_length}` : 'no stable lag'],
+        ['Rare goods', pct(p.rare_goods_monetary_share), 'money-role share'],
+        ['Concentration', pct(p.monetary_concentration), 'higher means fewer leaders'],
+        ['Leaders', leaders, `${p.cycles_observed || 0} cycles`],
+      ].map(([k, v, d]) => `<article class="card"><div class="k">${k}</div><div class="v" style="font-size:1.05rem">${v}</div><div class="small">${d}</div></article>`).join('');
+
+      $('goodsTable').innerHTML = state.goods.map(item => `
+        <tr class="${item.is_rare ? 'rare' : ''}">
+          <td class="mono">g${item.good_id}</td>
+          <td class="mono">${item.demand_rank}</td>
+          <td class="mono">${item.monetary_score.toFixed(3)}</td>
+          <td class="mono">${pct(item.purchase_breadth)}</td>
+          <td class="mono">${pct(item.inventory_acceptance_share)}</td>
+        </tr>
+      `).join('');
+
+      drawLine($('macroChart'), [
+        { values: state.history.map(item => item.utility_proxy_total), color: '#185f49' },
+        { values: state.history.map(item => item.production_total), color: '#aa5b32' },
+      ]);
+      drawLine($('tradeChart'), [
+        { values: state.history.map(item => item.accepted_trade_volume), color: '#213128' },
+        { values: state.history.map(item => item.inventory_trade_volume), color: '#88b69b' },
+      ]);
+      drawLine($('moneyChart'), [
+        { values: state.history.map(item => item.rare_goods_monetary_share), color: '#844719' },
+        { values: state.history.map(item => item.monetary_concentration), color: '#185f49' },
+      ]);
+      drawBars($('goodsChart'), state.goods);
+    }
+
+    function syncForm() {
+      const c = state.status?.config;
+      if (!c) return;
+      $('backend').value = state.status.backend_name || 'numpy';
+      $('batchCycles').value = state.status.batch_cycles || 1;
+      $('population').value = c.population;
+      $('goods').value = c.goods;
+      $('acquaintances').value = c.acquaintances;
+      $('activeAcquaintances').value = c.active_acquaintances;
+      $('demandCandidates').value = c.demand_candidates;
+      $('supplyCandidates').value = c.supply_candidates;
+      $('seed').value = c.seed;
+    }
+    function drawLine(canvas, series) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(255,255,255,0.52)';
+      ctx.fillRect(0, 0, w, h);
+      const pad = { top: 16, right: 16, bottom: 22, left: 24 };
+      const uw = w - pad.left - pad.right;
+      const uh = h - pad.top - pad.bottom;
+      const values = series.flatMap(item => item.values).filter(value => Number.isFinite(value));
+      if (!values.length) {
+        ctx.fillStyle = 'rgba(33,49,40,0.5)';
+        ctx.font = '14px Consolas';
+        ctx.fillText('No history yet', 24, h / 2);
+        return;
+      }
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const span = max - min || 1;
+      ctx.strokeStyle = 'rgba(33,49,40,0.12)';
+      for (let i = 0; i < 4; i += 1) {
+        const y = pad.top + (uh / 3) * i;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(w - pad.right, y);
+        ctx.stroke();
+      }
+      series.forEach(item => {
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = 2.3;
+        ctx.beginPath();
+        item.values.forEach((value, index) => {
+          const x = pad.left + (uw * index) / Math.max(item.values.length - 1, 1);
+          const y = pad.top + uh - ((value - min) / span) * uh;
+          if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+    }
+
+    function drawBars(canvas, goods) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(255,255,255,0.52)';
+      ctx.fillRect(0, 0, w, h);
+      if (!goods.length) {
+        ctx.fillStyle = 'rgba(33,49,40,0.5)';
+        ctx.font = '14px Consolas';
+        ctx.fillText('No goods yet', 24, h / 2);
+        return;
+      }
+      const left = 64;
+      const max = Math.max(...goods.map(item => item.monetary_score), 0.001);
+      const row = Math.max(14, Math.floor((h - 24) / goods.length) - 4);
+      goods.forEach((item, index) => {
+        const y = 14 + index * (row + 4);
+        const width = ((w - left - 24) * item.monetary_score) / max;
+        ctx.fillStyle = item.is_rare ? '#844719' : '#185f49';
+        ctx.fillRect(left, y, Math.max(width, 1), row);
+        ctx.fillStyle = '#213128';
+        ctx.font = '12px Consolas';
+        ctx.fillText(`g${item.good_id}`, 16, y + row - 1);
+        ctx.fillText(item.monetary_score.toFixed(3), left + Math.max(width + 8, 10), y + row - 1);
+      });
+    }
+
+    function showError(message) {
+      const box = $('errorBox');
+      box.textContent = message;
+      box.classList.add('visible');
+    }
+    function clearError() {
+      const box = $('errorBox');
+      box.textContent = '';
+      box.classList.remove('visible');
+    }
+    function payload() {
+      return {
+        backend_name: $('backend').value,
+        batch_cycles: Number($('batchCycles').value) || 1,
+        config: {
+          population: Number($('population').value),
+          goods: Number($('goods').value),
+          acquaintances: Number($('acquaintances').value),
+          active_acquaintances: Number($('activeAcquaintances').value),
+          demand_candidates: Number($('demandCandidates').value),
+          supply_candidates: Number($('supplyCandidates').value),
+          seed: Number($('seed').value),
+        },
+      };
+    }
+    async function postJson(url, body) {
+      await fetchJson(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      await refresh();
+    }
+    $('startBtn').addEventListener('click', () => postJson('/api/start'));
+    $('pauseBtn').addEventListener('click', () => postJson('/api/pause'));
+    $('stepBtn').addEventListener('click', () => postJson('/api/step', { cycles: Number($('stepCycles').value) || 1 }));
+    $('resetBtn').addEventListener('click', () => postJson('/api/reset', payload()));
+    refresh();
+    setInterval(refresh, 800);
+  </script>
+</body>
+</html>
