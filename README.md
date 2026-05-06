@@ -219,6 +219,8 @@ The separate realism-oriented basket path is enabled with `--experimental-agent-
 
 The preferred phenomenon-screening path is now `--experimental-session-clearing-phenomenon-exchange`. It keeps the exact path as the reference, but lets each active agent build a local barter shopping list over known acquaintances and goods, with every trade revalidated before commit. With no explicit hybrid settings, this path uses a population-wide frontier, no frontier-partner blocking, both consumption and surplus stages, and the existing native stage-math helpers for preparation/production/period-end work. Use it for exploratory long runs, then cross-check selected checkpoints or shorter windows against the exact path. The earlier `--experimental-parallel-phenomenon-exchange` wave path is deprecated and kept only as a comparison/rollback baseline.
 
+Operational convention for phenomenon runs: shorthand such as `3000/100/100` means population/goods/acquaintances, and the full acquaintance count is active unless a different active count is explicitly stated. In commands this means `--active-acquaintances` should normally equal `--acquaintances`; reducing the active friend set is a separate heuristic experiment, not the default interpretation.
+
 For Stage A debugging there is also an exchange-stage trace comparator:
 
 ```powershell
