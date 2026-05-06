@@ -73,6 +73,9 @@ class SimulationState:
     purchased_this_period: ArrayLike
     purchased_last_period: ArrayLike
     recent_inventory_inflow: ArrayLike
+    recent_purchase_value: ArrayLike
+    recent_sales_value: ArrayLike
+    recent_inventory_inflow_value: ArrayLike
     spoilage: ArrayLike
     periodic_spoilage: ArrayLike
     talent_mask: ArrayLike

@@ -85,8 +85,6 @@ def run_native_exchange_stage_trace_comparison(
                 config=_target_compare_config(config, seed=seed),
                 backend_name=backend_name,
             )
-            if config.experimental_native_exchange_stage:
-                setattr(target_engine, '_allow_rejected_native_exchange_stage', True)
 
             first_mismatch: dict[str, Any] | None = None
             cycles_completed = 0

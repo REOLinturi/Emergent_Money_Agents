@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emergent_money.config import SimulationConfig
 from emergent_money.legacy_search_backend import (
     ExchangeSearchRequest,
     ExchangeSearchResult,
     PythonExchangeSearchBackend,
+    build_native_exchange_search_backend,
     execute_exchange_search,
 )
 from emergent_money.native_search_compare import (
@@ -122,6 +124,18 @@ def test_run_native_search_comparison_captures_exact_cycle_calls() -> None:
     assert summary['comparison']['benchmark']['native_calls_per_second'] > 0.0
 
 
+def test_native_search_matches_python_on_large_parallel_candidate_grid() -> None:
+    native_backend = build_native_exchange_search_backend()
+    if native_backend is None:
+        pytest.skip('native exchange search backend is not available')
+
+    request = _large_parallel_request()
+    python_result = execute_exchange_search(PythonExchangeSearchBackend(), request)
+    native_result = execute_exchange_search(native_backend, request)
+
+    assert native_result == python_result
+
+
 def _sample_request() -> ExchangeSearchRequest:
     return ExchangeSearchRequest(
         goods=2,
@@ -162,4 +176,49 @@ def _sample_request() -> ExchangeSearchRequest:
         sales_price=np.ones((2, 2), dtype=np.float32),
         needs_level=np.ones((2,), dtype=np.float32),
         transparency=np.ones((2, 1, 2), dtype=np.float32),
+    )
+
+
+def _large_parallel_request() -> ExchangeSearchRequest:
+    rng = np.random.default_rng(2009)
+    population = 256
+    goods = 100
+    acquaintances = 150
+    need_good = 7
+    friend_ids = np.arange(1, acquaintances + 1, dtype=np.int32)
+    reciprocal_slots = np.zeros(acquaintances, dtype=np.int32)
+    elastic_need = rng.uniform(0.5, 3.0, goods).astype(np.float32)
+    candidate_offer_goods = np.asarray([good for good in range(goods) if good != need_good], dtype=np.int32)
+    stock = rng.uniform(0.0, 30.0, (population, goods)).astype(np.float32)
+    stock[1 : acquaintances + 1, need_good] = elastic_need[need_good] * 1.5 + 10.0
+    stock_limit = rng.uniform(15.0, 45.0, (population, goods)).astype(np.float32)
+    role = rng.choice([ROLE_CONSUMER, ROLE_RETAILER], size=(population, goods)).astype(np.int32)
+    purchase_price = rng.uniform(0.4, 3.0, (population, goods)).astype(np.float32)
+    sales_price = rng.uniform(0.4, 3.0, (population, goods)).astype(np.float32)
+    needs_level = rng.uniform(1.0, 2.0, population).astype(np.float32)
+    transparency = rng.uniform(0.4, 1.0, (population, acquaintances, goods)).astype(np.float32)
+    my_stock = rng.uniform(5.0, 35.0, goods).astype(np.float32)
+    my_stock[need_good] = 0.0
+
+    return ExchangeSearchRequest(
+        goods=goods,
+        need_good=need_good,
+        initial_transparency=0.7,
+        elastic_need=elastic_need,
+        candidate_offer_goods=candidate_offer_goods,
+        friend_ids=friend_ids,
+        reciprocal_slots=reciprocal_slots,
+        my_stock=my_stock,
+        my_sales_price=sales_price[0].copy(),
+        my_purchase_price=purchase_price[0].copy(),
+        my_role=role[0].copy(),
+        my_transparency=rng.uniform(0.4, 1.0, (acquaintances, goods)).astype(np.float32),
+        my_needs_level=float(needs_level[0]),
+        stock=stock,
+        role=role,
+        stock_limit=stock_limit,
+        purchase_price=purchase_price,
+        sales_price=sales_price,
+        needs_level=needs_level,
+        transparency=transparency,
     )

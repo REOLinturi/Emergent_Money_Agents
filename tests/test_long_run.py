@@ -80,3 +80,30 @@ def test_long_run_runner_writes_artifacts_and_resumes(tmp_path) -> None:
     payload = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
     assert payload["end_cycle"] == 4
     assert payload["latest_market"]["cycle"] == 4
+
+
+def test_uncompressed_checkpoint_round_trip_preserves_engine_state(tmp_path) -> None:
+    config = SimulationConfig(
+        population=10,
+        goods=4,
+        acquaintances=3,
+        active_acquaintances=2,
+        demand_candidates=2,
+        supply_candidates=2,
+    )
+
+    run_long_simulation(
+        cycles=2,
+        checkpoint_dir=tmp_path,
+        config=config,
+        backend_name="numpy",
+        checkpoint_every=1,
+        sample_every=1,
+        compress_checkpoint=False,
+    )
+
+    restored = load_checkpoint(tmp_path)
+
+    assert restored.cycle == 2
+    assert restored.config.population == config.population
+    assert np.all(restored.backend.to_numpy(restored.state.stock) >= 0.0)

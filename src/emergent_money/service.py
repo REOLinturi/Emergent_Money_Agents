@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from .analytics import analyze_history, compute_good_snapshots
+from .analytics import analyze_history, compute_good_snapshots, compute_inequality_snapshot, compute_role_snapshots, summarize_recent_trends
 from .dto import (
     AgentSnapshot,
     ExperimentReport,
+    GoodRoleSnapshot,
     GoodSnapshot,
+    InequalitySnapshot,
     MarketSnapshot,
     NetworkSlice,
     PhenomenaSnapshot,
+    RecentTrendWindowSnapshot,
     RunStatus,
     TradeProposalView,
 )
@@ -95,6 +98,24 @@ class SimulationService:
     def get_phenomena_snapshot(self, top_goods: int = 8) -> PhenomenaSnapshot:
         goods = self.get_goods_snapshot(limit=top_goods)
         return analyze_history(self.engine.history, goods)
+
+    def get_recent_trends_snapshot(self, windows: tuple[int, ...] = (50, 100, 200)) -> list[RecentTrendWindowSnapshot]:
+        return summarize_recent_trends(self.engine.history, windows=windows)
+
+    def get_role_mix_snapshot(self, limit: int = 10, sort_by: str = 'retailer_count') -> list[GoodRoleSnapshot]:
+        return compute_role_snapshots(
+            state=self.engine.state,
+            backend=self.engine.backend,
+            limit=limit,
+            sort_by=sort_by,
+        )
+
+    def get_inequality_snapshot(self) -> InequalitySnapshot:
+        return compute_inequality_snapshot(
+            state=self.engine.state,
+            backend=self.engine.backend,
+            config=self.engine.config,
+        )
 
     def get_agent_snapshot(self, agent_id: int) -> AgentSnapshot:
         self._validate_agent_id(agent_id)

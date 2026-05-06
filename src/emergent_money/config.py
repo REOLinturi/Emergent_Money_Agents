@@ -13,6 +13,8 @@ class SimulationConfig:
     active_acquaintances: int = 24
     demand_candidates: int = 4
     supply_candidates: int = 4
+    base_good_id_offset: int = 0
+    base_good_id_stride: int = 1
     seed: int = 2009
     initial_efficiency: float = 1.0
     gifted_efficiency_bonus: float = 1.0
@@ -33,6 +35,8 @@ class SimulationConfig:
     price_reduction: float = 0.95
     price_hike: float = 1.05
     price_leap: float = 1.30
+    legacy_price_floor: float | None = None
+    use_value_price_floor_fraction: float = 1.0
     max_rise_in_elastic_need: float = 1.01
     max_drop_in_elastic_need: float = 0.98
     max_stocklimit_decrease: float = 0.95
@@ -46,6 +50,12 @@ class SimulationConfig:
     switch_time: float = 1.0
     min_trade_quantity: float = 0.5
     trade_rounding_buffer: float = 1.0 / 3.0
+    experimental_local_liquidity_stock_bias: float = 0.0
+    experimental_local_liquidity_min_sales: float = 2.0
+    experimental_aspirational_stock_target: float = 0.0
+    experimental_session_replan_passes: int = 1
+    experimental_session_replan_after_trade: bool = False
+    experimental_session_candidate_depth: int = 1
     cuda_friend_block: int = 12
     cuda_goods_block: int = 25
     experimental_hybrid_batches: int = 0
@@ -56,8 +66,12 @@ class SimulationConfig:
     experimental_hybrid_block_frontier_partners: bool = True
     experimental_hybrid_preserve_proposer_order: bool = False
     experimental_hybrid_rolling_frontier: bool = False
+    experimental_parallel_phenomenon_exchange: bool = False
+    experimental_session_clearing_phenomenon_exchange: bool = False
     experimental_native_stage_math: bool = False
     experimental_native_exchange_stage: bool = False
+    experimental_agent_basket_planning: bool = False
+    legacy_extra_demand_round: bool = False
     use_exact_legacy_mechanics: bool = True
 
     def __post_init__(self) -> None:
@@ -73,6 +87,10 @@ class SimulationConfig:
             raise ValueError("demand_candidates must be between 1 and goods")
         if self.supply_candidates <= 0 or self.supply_candidates > self.goods:
             raise ValueError("supply_candidates must be between 1 and goods")
+        if self.base_good_id_offset < 0:
+            raise ValueError("base_good_id_offset must be non-negative")
+        if self.base_good_id_stride <= 0:
+            raise ValueError("base_good_id_stride must be positive")
         if not 0.0 <= self.talent_probability <= 1.0:
             raise ValueError("talent_probability must be between 0 and 1")
         if self.gifted_efficiency_bonus < 0.0:
@@ -109,6 +127,10 @@ class SimulationConfig:
             raise ValueError("price_hike must be at least 1")
         if self.price_leap < 1.0:
             raise ValueError("price_leap must be at least 1")
+        if self.legacy_price_floor is not None and self.legacy_price_floor < 0.0:
+            raise ValueError("legacy_price_floor must be non-negative when provided")
+        if not 0.0 <= self.use_value_price_floor_fraction <= 1.0:
+            raise ValueError("use_value_price_floor_fraction must be between 0 and 1")
         if self.max_rise_in_elastic_need < 1.0:
             raise ValueError("max_rise_in_elastic_need must be at least 1")
         if not 0.0 < self.max_drop_in_elastic_need <= 1.0:
@@ -135,6 +157,16 @@ class SimulationConfig:
             raise ValueError("min_trade_quantity must be positive")
         if self.trade_rounding_buffer < 0.0:
             raise ValueError("trade_rounding_buffer must be non-negative")
+        if self.experimental_local_liquidity_stock_bias < 0.0:
+            raise ValueError("experimental_local_liquidity_stock_bias must be non-negative")
+        if self.experimental_local_liquidity_min_sales < 0.0:
+            raise ValueError("experimental_local_liquidity_min_sales must be non-negative")
+        if self.experimental_aspirational_stock_target < 0.0:
+            raise ValueError("experimental_aspirational_stock_target must be non-negative")
+        if self.experimental_session_replan_passes <= 0:
+            raise ValueError("experimental_session_replan_passes must be positive")
+        if self.experimental_session_candidate_depth <= 0:
+            raise ValueError("experimental_session_candidate_depth must be positive")
         if self.cuda_friend_block <= 0:
             raise ValueError("cuda_friend_block must be positive")
         if self.cuda_goods_block <= 0:
@@ -188,4 +220,5 @@ class SimulationConfig:
         return int(round(self.population * self.talent_probability))
 
     def base_need_vector(self) -> np.ndarray:
-        return np.arange(1, self.goods + 1, dtype=np.float32) ** 2
+        source_good_ids = self.base_good_id_offset + (np.arange(self.goods, dtype=np.float32) * self.base_good_id_stride)
+        return (source_good_ids + 1.0) ** 2

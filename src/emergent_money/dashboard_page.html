@@ -99,12 +99,13 @@
       gap: 14px;
     }
     .controls { position: sticky; top: 16px; }
-    .field-grid, .metrics, .phenomena {
+    .field-grid, .indicator-grid, .phenomena {
       display: grid;
       gap: 12px;
     }
     .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .indicator-groups { display: grid; gap: 16px; }
+    .indicator-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .phenomena { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 0.82rem; }
@@ -138,6 +139,41 @@
       border-radius: 18px;
       border: 1px solid rgba(33,49,40,0.08);
       background: rgba(255,255,255,0.74);
+    }
+    .card {
+      display: grid;
+      gap: 6px;
+      align-content: start;
+    }
+    .metric-section {
+      display: grid;
+      gap: 10px;
+    }
+    .section-head, .card-head, .chart-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .section-head {
+      align-items: center;
+    }
+    .info-button {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      display: inline-grid;
+      place-items: center;
+      padding: 0;
+      border-radius: 999px;
+      border: 1px solid rgba(24,95,73,0.18);
+      background: rgba(24,95,73,0.08);
+      color: var(--accent);
+      font: 700 0.78rem Consolas, "Lucida Console", monospace;
+      line-height: 1;
+    }
+    .info-button:hover {
+      background: rgba(24,95,73,0.14);
     }
     .card .k {
       color: var(--muted);
@@ -174,6 +210,43 @@
       font-size: 0.82rem;
     }
     .error.visible { display: block; }
+    .exact-note {
+      display: none;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(24,95,73,0.10);
+      border: 1px solid rgba(24,95,73,0.14);
+      color: var(--ink);
+    }
+    .exact-note.visible { display: block; }
+    .help-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: none;
+      place-items: center;
+      padding: 20px;
+      background: rgba(33,49,40,0.24);
+    }
+    .help-overlay.visible { display: grid; }
+    .help-dialog {
+      width: min(560px, 100%);
+      padding: 20px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.7);
+      background: rgba(255,250,240,0.98);
+      box-shadow: 0 24px 80px rgba(33,49,40,0.22);
+      display: grid;
+      gap: 10px;
+    }
+    .help-dialog h3 {
+      font-size: 1.35rem;
+      letter-spacing: -0.03em;
+    }
+    .help-dialog button {
+      justify-self: end;
+      min-width: 96px;
+    }
     @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
     @keyframes pulse { from { box-shadow: 0 0 0 0 rgba(24,95,73,0.25); } to { box-shadow: 0 0 0 14px rgba(24,95,73,0); } }
     @media (max-width: 1180px) {
@@ -182,7 +255,7 @@
     }
     @media (max-width: 720px) {
       .shell { width: min(100vw - 16px, 100%); margin: 8px auto 20px; }
-      .field-grid, .buttons, .metrics, .phenomena { grid-template-columns: 1fr; }
+      .field-grid, .buttons, .indicator-grid, .phenomena { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -196,24 +269,27 @@
         <div class="pill">cycle <span id="cycleMeta">0</span></div>
         <div class="pill">backend <span id="backendMeta">numpy</span></div>
         <div class="pill">batch <span id="batchMeta">1</span></div>
+        <div class="pill">mode <span id="modeMeta">live</span></div>
       </div>
     </section>
     <div class="layout">
       <aside class="panel controls">
         <div>
           <h2>Run control</h2>
-          <p class="small">Reset parameters when changing model size. Polling uses snapshots only.</p>
+          <p id="controlHint" class="small">Reset parameters when changing model size. Polling uses snapshots only.</p>
         </div>
         <div id="errorBox" class="error"></div>
+        <div id="artifactNote" class="small mono"></div>
+        <div id="exactLegacyNote" class="small exact-note">Exact legacy mode uses each agent's full acquaintance list with exhaustive barter scoring. Active acquaintances, demand candidates, and supply candidates are scaffold-only here.</div>
         <div class="field-grid">
           <label>Backend<select id="backend"><option value="numpy">numpy</option><option value="cuda">cuda</option></select></label>
           <label>Batch cycles<input id="batchCycles" type="number" min="1" step="1" value="1"></label>
           <label>Population<input id="population" type="number" min="2" step="1" value="256"></label>
           <label>Goods<input id="goods" type="number" min="2" step="1" value="12"></label>
           <label>Acquaintances<input id="acquaintances" type="number" min="1" step="1" value="24"></label>
-          <label>Active acquaintances<input id="activeAcquaintances" type="number" min="1" step="1" value="8"></label>
-          <label>Demand candidates<input id="demandCandidates" type="number" min="1" step="1" value="4"></label>
-          <label>Supply candidates<input id="supplyCandidates" type="number" min="1" step="1" value="4"></label>
+          <label class="exact-scaffold-field">Active acquaintances<input id="activeAcquaintances" type="number" min="1" step="1" value="8"></label>
+          <label class="exact-scaffold-field">Demand candidates<input id="demandCandidates" type="number" min="1" step="1" value="4"></label>
+          <label class="exact-scaffold-field">Supply candidates<input id="supplyCandidates" type="number" min="1" step="1" value="4"></label>
           <label>Seed<input id="seed" type="number" step="1" value="2009"></label>
           <label>Step cycles<input id="stepCycles" type="number" min="1" step="1" value="10"></label>
         </div>
@@ -225,66 +301,184 @@
         </div>
       </aside>
       <main class="panel">
-        <div id="metrics" class="metrics"></div>
+        <div id="metrics" class="indicator-groups"></div>
         <section>
           <h2>Phenomena watch</h2>
           <p class="small">Cycle signal comes from trade-volume autocorrelation. Monetary-role metrics track inventory acceptance and breadth.</p>
           <div id="phenomena" class="phenomena"></div>
         </section>
+        <section>
+          <h2>Recent windows</h2>
+          <p class="small">Whole-run cards above summarize the full observed history. These cards isolate the latest 50, 100, and 200 cycles so cooling or acceleration is easier to see.</p>
+          <div id="recentTrendCards" class="phenomena"></div>
+        </section>
+        <section>
+          <h2>Run progress</h2>
+          <p class="small">Checkpoint age, recent throughput, and ETA are inferred from observer artifacts and runner logs only.</p>
+          <div id="progressCards" class="phenomena"></div>
+        </section>
         <section class="charts">
           <div class="chart-card">
-            <h3>Macro path</h3>
-            <p class="small">Utility proxy and production.</p>
+            <div class="chart-head"><h3>Macro path</h3><button type="button" class="info-button" data-help-key="chart_macro" aria-label="Explain Macro path">?</button></div>
+            <p class="small">Indexed utility proxy and production. Each line starts from 100 at the first visible checkpoint so both trends stay visible.</p>
             <canvas id="macroChart" width="640" height="240"></canvas>
-            <div class="legend small"><span>green utility</span><span>amber production</span></div>
+            <div class="legend small"><span>green utility-proxy index</span><span>amber production index</span></div>
           </div>
           <div class="chart-card">
-            <h3>Trade pulse</h3>
-            <p class="small">Accepted and inventory-directed trade volumes.</p>
+            <div class="chart-head"><h3>Welfare path</h3><button type="button" class="info-button" data-help-key="chart_welfare" aria-label="Explain Welfare path">?</button></div>
+            <p class="small">Achieved living-standard baseline multiplier. Median and mean show level; p10 and p90 show distribution width.</p>
+            <canvas id="welfareChart" width="640" height="240"></canvas>
+            <div class="legend small"><span>green median</span><span>amber mean</span><span>red p10</span><span>blue p90</span></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-head"><h3>Trade pulse</h3><button type="button" class="info-button" data-help-key="chart_trade" aria-label="Explain Trade pulse">?</button></div>
+            <p class="small">Dark line is accepted trade volume. Soft green is inventory-directed trade and can exceed it when intermediation and stock-building dominate.</p>
             <canvas id="tradeChart" width="640" height="240"></canvas>
             <div class="legend small"><span>dark trade volume</span><span>soft green inventory trade</span></div>
-          </div>          <div class="chart-card">
-            <h3>Monetary shift</h3>
-            <p class="small">Rare-goods money share and concentration.</p>
-            <canvas id="moneyChart" width="640" height="240"></canvas>
-            <div class="legend small"><span>brown rare-money share</span><span>green concentration</span></div>
           </div>
           <div class="chart-card">
-            <h3>Top monetary goods</h3>
+            <div class="chart-head"><h3>Monetary shift</h3><button type="button" class="info-button" data-help-key="chart_money" aria-label="Explain Monetary shift">?</button></div>
+            <p class="small">Merchant-money shares plus a circulation-and-friction exchange-media approximation.</p>
+            <canvas id="moneyChart" width="640" height="240"></canvas>
+            <div class="legend small"><span>brown rare share</span><span>gold value rare share</span><span>blue exchange-media rare</span><span>green concentration</span></div>
+          </div>
+          <div class="chart-card">
+            <div class="chart-head"><h3>Exchange-media candidates</h3><button type="button" class="info-button" data-help-key="chart_goods" aria-label="Explain Exchange-media candidates">?</button></div>
             <p class="small">Warm rows belong to the rare-demand quartile.</p>
             <canvas id="goodsChart" width="640" height="240"></canvas>
             <table>
               <thead>
-                <tr><th>Good</th><th>Demand rank</th><th>Money score</th><th>Breadth</th><th>Inv. share</th></tr>
+                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Quantity-based merchant-money score.">Qty score</th><th title="Value-weighted merchant-money score.">Value score</th></tr>
               </thead>
               <tbody id="goodsTable"></tbody>
+            </table>
+          </div>
+          <div class="chart-card">
+            <div class="chart-head"><h3>Role mix by good</h3><button type="button" class="info-button" data-help-key="chart_roles" aria-label="Explain Role mix by good">?</button></div>
+            <p class="small">Producer / retailer / consumer counts, retailer stock pressure, and producer concentration.</p>
+            <table>
+              <thead>
+                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Rank</th><th title="Agents currently treating this good primarily as production output.">Prod</th><th title="Agents currently buying or holding the good for resale or later exchange.">Retail</th><th title="Agents primarily needing the good for own use.">Cons</th><th title="Recent amount flowing into retailer inventories.">Retail inflow</th><th title="Average retailer stock divided by stock limit.">Retail stock/limit</th><th title="Largest producer's share of recent production for this good.">Top-1 prod</th><th title="Share of the top producer's recent output volume that is this good.">Top output focus</th><th title="Share of the top producer's estimated production time spent on this good across all goods.">Top prod focus</th></tr>
+              </thead>
+              <tbody id="roleTable"></tbody>
             </table>
           </div>
         </section>
       </main>
     </div>
   </div>
+  <div id="helpOverlay" class="help-overlay" role="dialog" aria-modal="true" aria-labelledby="helpTitle" aria-hidden="true">
+    <div class="help-dialog">
+      <h3 id="helpTitle">Indicator</h3>
+      <p id="helpText" class="small"></p>
+      <button id="helpClose" type="button" class="secondary">Close</button>
+    </div>
+  </div>
   <script>
-    const state = { status: null, market: null, history: [], goods: [], phenomena: null };
+    const state = { status: null, market: null, history: [], goods: [], phenomena: null, recentTrends: [], roleGoods: [], inequality: null, progress: null };
     const $ = id => document.getElementById(id);
     const pct = value => `${((value || 0) * 100).toFixed(1)}%`;
     const num = value => {
       const v = Number(value || 0);
       return Math.abs(v) >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : v.toFixed(2);
     };
-    const metrics = [
-      ['Cycle', m => String(m.cycle || 0), m => state.status?.backend_name || 'numpy'],
-      ['Fulfilled', m => pct(m.fulfilled_share), m => `unmet ${num(m.unmet_need_total)}`],
-      ['Utility', m => num(m.utility_proxy_total), m => `needs ${num(m.average_needs_level)}`],
-      ['Production', m => num(m.production_total), m => `surplus ${num(m.surplus_output_total)}`],
-      ['Trade volume', m => num(m.accepted_trade_volume), m => `${m.accepted_trade_count || 0} accepted`],
-      ['Inventory trade', m => num(m.inventory_trade_volume), m => `stock use ${num(m.stock_consumption_total)}`],
-      ['TCE waste', m => num(m.tce_cost_in_time_total), m => `raw ${num(m.periodic_tce_cost_total)}`],
-      ['Spoilage', m => num(m.spoilage_cost_in_time_total), m => `raw ${num(m.periodic_spoilage_total)}`],
-      ['Stored delta', m => num(m.stored_delta_total), m => `price ${num(m.price_average)}`],
-      ['Rare-money share', m => pct(m.rare_goods_monetary_share), m => `conc ${pct(m.monetary_concentration)}`],
-      ['Network density', m => pct(m.network_density), m => `history ${state.status?.history_length || 0}`],
-    ];
+    const signedPct = value => {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return 'n/a';
+      const pctValue = Number(value) * 100;
+      const sign = pctValue > 0 ? '+' : '';
+      return `${sign}${pctValue.toFixed(1)}%`;
+    };
+    const duration = value => {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return 'n/a';
+      const seconds = Math.max(0, Math.round(Number(value)));
+      if (seconds < 60) return `${seconds}s`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      return `${hours}h ${minutes}m`;
+    };
+    const ratio = (high, low) => {
+      const h = Number(high || 0);
+      const l = Number(low || 0);
+      if (!Number.isFinite(h) || !Number.isFinite(l) || Math.abs(l) < 1e-9) return 'n/a';
+      return `${(h / l).toFixed(1)}x`;
+    };
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[char]);
+    const helpText = {
+      cycle: ['Cycle', 'Current simulation cycle in the observed checkpoint stream. It is a progress marker, not an economic variable.'],
+      fulfilled: ['Fulfilled need', 'Share of base needs currently met. If this falls below 100%, utility and living-standard measures should be read as stressed because some direct needs are not being met.'],
+      utility_proxy: ['Utility proxy', 'Average needs level recorded by the model. It tracks the scale of consumption opportunities, but it is not a full welfare measure because it does not directly price distribution, time burden, or transaction friction.'],
+      living_mean: ['Living standard', 'Achieved consumption level expressed as a baseline multiplier. It is based on fulfilled current needs relative to the original baseline basket and does not include aspirational stock deficits.'],
+      living_gini: ['Living standard Gini', 'Inequality of the achieved baseline-multiplier living standard. 0 means equal; larger values mean the achieved consumption level is concentrated.'],
+      living_spread: ['Living spread', 'Percentile spread of achieved living standard. This should not go negative; if p10 falls below 1, some agents fail even the baseline assumption.'],
+      aspiration_balance: ['Aspirational balance', 'Surplus or deficit relative to the agent’s current expected lifestyle and stock position. This may be negative; it should not be read as negative consumption.'],
+      aspiration_shortfall: ['Expectation shortfall', 'Share of agents below their aspirational balance threshold. This is the key distress measure: how many must cut back from their expected lifestyle.'],
+      aspiration_severity: ['Shortfall severity', 'Size of the aspirational deficit among agents. Large values indicate forced cutbacks such as downsizing, giving up durable goods, or abandoning a higher consumption tier.'],
+      smith_cost: ['Smith need cost', 'Median estimated time-and-effort cost of acquiring the current need basket. This follows the Adam Smith interpretation: welfare improves when less effort is needed to get what one needs.'],
+      smith_gini: ['Smith cost Gini', 'Inequality of the need-basket effort burden. High values mean some agents need substantially more effort than others to reach the same effective basket.'],
+      production: ['Production', 'Gross produced amount in model units for the latest cycle. It can rise while welfare stagnates if more output is absorbed by inventories, transaction costs, spoilage, or low-value circulation.'],
+      output_time_value: ['Output time value', 'Produced goods valued with current average prices. This is a purchasing-power style output measure, not physical tons or direct welfare.'],
+      direct_production_time: ['Direct production time', 'Estimated agent time directly spent producing the goods generated this cycle, using each agent-good efficiency.'],
+      friction_output: ['Friction / output', 'TCE plus spoilage cost in time-equivalent units divided by output time value. It is a rough share of gross output lost to exchange friction and decay.'],
+      friction_time: ['Friction / time budget', 'TCE plus spoilage cost divided by the total available agent time budget. This asks how much social time-equivalent capacity disappears into friction.'],
+      trade_volume: ['Trade volume', 'Accepted exchange volume in the latest cycle. It measures market activity, not necessarily welfare; speculative inventory circulation can raise it.'],
+      inventory_trade: ['Inventory trade', 'Accepted trade that flows into inventory or intermediation rather than direct immediate need. Rising values can indicate merchant-chain formation or stock-building.'],
+      stored_delta: ['Stored delta', 'Value change stored in inventories at current prices. Large positive values can signal stock accumulation; negative movement can signal liquidation pressure.'],
+      stock_gini: ['Stock value Gini', 'Inequality of valued inventories across agents. This is closer to wealth or balance-sheet inequality than living-standard inequality.'],
+      stock_top: ['Stock top 10% share', 'Share of total valued stock held by the richest tenth of agents by inventory value.'],
+      stock_level: ['Stock value level', 'Mean and median valued inventories. Mean above median implies concentrated inventories even when Gini is moderate.'],
+      rare_money: ['Rare-money share', 'Share of the composite merchant-money score carried by rare-demand goods. The score now focuses on goods bought and resold by agents currently acting as retailers, not all stock inflow.'],
+      value_rare_money: ['Value-weighted rare-money share', 'Share of the value-weighted merchant-money score carried by rare-demand goods. New runs use values observed at executed trades; older checkpoints fall back to current private-price weighting. This is reporting only, not an agent decision input.'],
+      exchange_media: ['Exchange-media rare share', 'Share of the lightweight exchange-media score carried by rare-demand goods. The score looks for broad local circulation, stock over own-need scale, and high transaction-cost loss relative to current consumption need. It is reporting only.'],
+      concentration: ['Monetary concentration', 'Herfindahl-style concentration of merchant-money scores. Higher values mean fewer goods dominate intermediary exchange-media roles.'],
+      value_concentration: ['Value-weighted concentration', 'Concentration of the value-weighted merchant-money score. It identifies whether high-valued intermediary exchange-media roles are dominated by a few goods.'],
+      exchange_concentration: ['Exchange-media concentration', 'Herfindahl-style concentration of the lightweight exchange-media score. Higher values mean fewer goods dominate goods that circulate broadly and absorb transaction friction.'],
+      network_density: ['Network density', 'Share of possible acquaintance links represented in the current network. It gives context for how broad exchange opportunities are.'],
+      tce_waste: ['TCE waste', 'Transaction-cost-equivalent waste converted to time units, with raw model cost shown below. It is one reason production can diverge from welfare.'],
+      spoilage: ['Spoilage', 'Spoilage converted to time units, with raw spoilage shown below. It captures output or stock that decays before useful consumption or exchange.'],
+      economy: ['Economy trend', 'Whole-observed-history production slope. It is useful for long-run direction, but recent-window cards are better for turning points.'],
+      phenomena_utility: ['Utility trend', 'Whole-observed-history utility-proxy slope. It can remain weak even while production grows if gains are absorbed by friction, inventories, or inequality.'],
+      cycles: ['Cycle signal', 'Autocorrelation of trade-volume changes. Strong repeated lags suggest cyclical dynamics; weak signal means the current window does not yet show a stable cycle.'],
+      leaders: ['Monetary leaders', 'Goods with the highest current monetary-role score. This is a normalized role score, not simply raw trade volume.'],
+      recent_window: ['Recent window', 'Short-window trend over the latest cycles. These cards are meant for detecting cooling, acceleration, or possible recession earlier than whole-run indicators.'],
+      progress: ['Progress', 'Observed cycle relative to runner target, inferred from checkpoint and runner artifacts. It does not change the simulation.'],
+      checkpoint_age: ['Checkpoint age', 'Wall-clock time since the checkpoint file was last updated. If this grows unexpectedly, the long run may be stalled or working on a slow chunk.'],
+      chunk_target: ['Chunk target', 'Latest chunk start and target cycle parsed from the runner log. It helps distinguish slow progress from a stopped run.'],
+      eta: ['ETA', 'Estimated remaining wall time using recent seconds per cycle from runner logs. Treat as approximate because cycle time can change.'],
+      chart_macro: ['Macro path', 'Production and utility proxy are indexed to the first visible checkpoint so they can be compared on one scale. A rising production line with flat utility is a welfare/productivity divergence.'],
+      chart_welfare: ['Welfare path', 'Achieved living-standard percentiles are shown in baseline-multiplier units. Median tracks typical welfare; p10 shows distress at the lower tail; p90 shows upper-tail gains.'],
+      chart_trade: ['Trade pulse', 'Accepted trade volume shows market activity. Inventory trade shows the portion associated with intermediation and stock-building, which may grow before welfare improves.'],
+      chart_money: ['Monetary shift', 'Rare-money share shows whether rare goods act as exchange media through merchant-style intermediation. The blue line is a lighter approximation that does not rely on barter direction; it scores broad local circulation, stock over need, and transaction-cost loss relative to need. These aggregates are not visible to agents.'],
+      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Quantity and value merchant-money scores remain as comparison columns.'],
+      chart_roles: ['Role mix by good', 'This table shows whether goods are mainly produced, consumed, or intermediated, and whether production is concentrated enough to indicate specialization.'],
+    };
+    const helpButton = (key, label) => helpText[key]
+      ? `<button type="button" class="info-button" data-help-key="${esc(key)}" aria-label="Explain ${esc(label)}">?</button>`
+      : '';
+    const card = ({ key, label, value, detail, valueStyle = '' }) => `
+      <article class="card">
+        <div class="card-head"><div class="k">${esc(label)}</div>${helpButton(key, label)}</div>
+        <div class="v"${valueStyle ? ` style="${esc(valueStyle)}"` : ''}>${esc(value)}</div>
+        <div class="small mono">${esc(detail)}</div>
+      </article>
+    `;
+    const indicatorSection = (title, description, cards) => `
+      <section class="metric-section">
+        <div class="section-head">
+          <div>
+            <h2>${esc(title)}</h2>
+            <p class="small">${esc(description)}</p>
+          </div>
+        </div>
+        <div class="indicator-grid">${cards.join('')}</div>
+      </section>
+    `;
 
     async function fetchJson(url, options) {
       const response = await fetch(url, options);
@@ -296,18 +490,26 @@
 
     async function refresh() {
       try {
-        const [status, market, history, goods, phenomena] = await Promise.all([
+        const [status, market, history, goods, phenomena, recentTrends, roleGoods, inequality, progress] = await Promise.all([
           fetchJson('/api/status'),
           fetchJson('/api/market'),
           fetchJson('/api/history?limit=240'),
-          fetchJson('/api/goods?limit=10'),
+          fetchJson('/api/goods?limit=12&sort_by=exchange_media_score'),
           fetchJson('/api/phenomena?top_goods=10'),
+          fetchJson('/api/recent_trends'),
+          fetchJson('/api/roles?limit=12'),
+          fetchJson('/api/inequality'),
+          fetchJson('/api/progress'),
         ]);
         state.status = status;
         state.market = market;
         state.history = history;
         state.goods = goods;
         state.phenomena = phenomena;
+        state.recentTrends = recentTrends;
+        state.roleGoods = roleGoods;
+        state.inequality = inequality;
+        state.progress = progress;
         render();
       } catch (error) {
         showError(error.message || String(error));
@@ -317,44 +519,139 @@
     function render() {
       clearError();
       syncForm();
+      const readOnly = Boolean(state.status?.read_only);
+      const exactLegacy = Boolean(state.status?.config?.use_exact_legacy_mechanics);
       $('dot').classList.toggle('running', Boolean(state.status?.is_running));
-      $('runState').textContent = state.status?.is_running ? 'Running' : 'Idle';
+      $('runState').textContent = readOnly ? (state.status?.completed ? 'Observed' : 'Observing') : (state.status?.is_running ? 'Running' : 'Idle');
       $('cycleMeta').textContent = state.status?.cycle ?? 0;
       $('backendMeta').textContent = state.status?.backend_name ?? 'numpy';
-      $('batchMeta').textContent = state.status?.batch_cycles ?? 1;
+      $('batchMeta').textContent = readOnly ? 'read-only' : (state.status?.batch_cycles ?? 1);
+      $('modeMeta').textContent = readOnly ? 'artifact observer' : 'live control';
+      $('controlHint').textContent = readOnly
+        ? 'This dashboard is attached to checkpoint artifacts and cannot change the running simulation.'
+        : 'Reset parameters when changing model size. Polling uses snapshots only.';
+      $('artifactNote').textContent = readOnly ? (state.status?.artifact_dir || '') : '';
+      $('exactLegacyNote').classList.toggle('visible', exactLegacy);
+      document.querySelectorAll('.exact-scaffold-field').forEach(node => {
+        node.hidden = exactLegacy;
+      });
 
-      $('metrics').innerHTML = metrics.map(([label, valueFn, detailFn]) => `
-        <article class="card">
-          <div class="k">${label}</div>
-          <div class="v">${valueFn(state.market || {})}</div>
-          <div class="small mono">${detailFn(state.market || {})}</div>
-        </article>
-      `).join('');
+      const market = state.market || {};
+      const inequality = state.inequality || {};
+      $('metrics').innerHTML = [
+        indicatorSection('Run and fulfillment', 'Run state and direct need satisfaction.', [
+          card({ key: 'cycle', label: 'Cycle', value: String(market.cycle || 0), detail: state.status?.backend_name || 'numpy' }),
+          card({ key: 'fulfilled', label: 'Fulfilled', value: pct(market.fulfilled_share), detail: `unmet ${num(market.unmet_need_total)}` }),
+          card({ key: 'network_density', label: 'Network density', value: pct(market.network_density), detail: `history ${state.status?.history_length || 0}` }),
+        ]),
+        indicatorSection('Living standard and effort', 'Welfare-oriented measures separated from gross production.', [
+          card({ key: 'utility_proxy', label: 'Utility proxy', value: num(market.utility_proxy_total), detail: `needs ${num(market.average_needs_level)}` }),
+          card({ key: 'living_mean', label: 'Living standard', value: num(inequality.living_standard_median), detail: `baseline multiplier | mean ${num(inequality.living_standard_mean)}` }),
+          card({ key: 'living_gini', label: 'Living standard Gini', value: num(inequality.living_standard_gini), detail: `0 equal | p90/p10 ${ratio(inequality.living_standard_p90, inequality.living_standard_p10)}` }),
+          card({ key: 'living_spread', label: 'Living spread', value: num(inequality.living_standard_p90), detail: `p10 ${num(inequality.living_standard_p10)} | p50 ${num(inequality.living_standard_median)} | p99 ${num(inequality.living_standard_p99)}` }),
+          card({ key: 'aspiration_shortfall', label: 'Expectation shortfall', value: pct(inequality.aspiration_shortfall_share), detail: `deficit p90 ${num(inequality.aspiration_shortfall_p90)} | balance p10 ${num(inequality.aspiration_balance_p10)}` }),
+          card({ key: 'aspiration_balance', label: 'Aspirational balance', value: num(inequality.aspiration_balance_median), detail: `p10 ${num(inequality.aspiration_balance_p10)} | p90 ${num(inequality.aspiration_balance_p90)}` }),
+          card({ key: 'smith_cost', label: 'Smith need cost', value: num(inequality.smith_cost_median), detail: `time to need basket | mean ${num(inequality.smith_cost_mean)} | p90 ${num(inequality.smith_cost_p90)}` }),
+          card({ key: 'smith_gini', label: 'Smith cost Gini', value: num(inequality.smith_cost_gini), detail: `high-cost 10% share ${pct(inequality.smith_cost_top_decile_share)} | p10 ${num(inequality.smith_cost_p10)}` }),
+        ]),
+        indicatorSection('Production and friction', 'How much output is created, and how much time-equivalent value is absorbed by exchange friction or spoilage.', [
+          card({ key: 'production', label: 'Production', value: num(market.production_total), detail: `surplus ${num(market.surplus_output_total)}` }),
+          card({ key: 'output_time_value', label: 'Output time value', value: num(inequality.production_time_value), detail: `price-valued output` }),
+          card({ key: 'direct_production_time', label: 'Direct production time', value: num(inequality.direct_production_time), detail: `budget ${pct(inequality.production_time_share_of_budget)}` }),
+          card({ key: 'friction_output', label: 'Friction / output', value: pct(inequality.friction_share_of_output_value), detail: `TCE ${pct(inequality.tce_share_of_output_value)} | spoilage ${pct(inequality.spoilage_share_of_output_value)}` }),
+          card({ key: 'friction_time', label: 'Friction / time budget', value: pct(inequality.friction_share_of_time_budget), detail: `TCE ${pct(inequality.tce_share_of_time_budget)} | spoilage ${pct(inequality.spoilage_share_of_time_budget)}` }),
+          card({ key: 'tce_waste', label: 'TCE waste', value: num(market.tce_cost_in_time_total), detail: `raw ${num(market.periodic_tce_cost_total)}` }),
+          card({ key: 'spoilage', label: 'Spoilage', value: num(market.spoilage_cost_in_time_total), detail: `raw ${num(market.periodic_spoilage_total)}` }),
+        ]),
+        indicatorSection('Trade, wealth, and money', 'Market activity, balance-sheet accumulation, and emergence of exchange media.', [
+          card({ key: 'trade_volume', label: 'Trade volume', value: num(market.accepted_trade_volume), detail: `${market.accepted_trade_count || 0} accepted` }),
+          card({ key: 'inventory_trade', label: 'Inventory trade', value: num(market.inventory_trade_volume), detail: `stock use ${num(market.stock_consumption_total)}` }),
+          card({ key: 'stored_delta', label: 'Stored delta', value: num(market.stored_delta_total), detail: `price ${num(market.price_average)}` }),
+          card({ key: 'stock_gini', label: 'Stock value Gini', value: num(inequality.stock_value_gini), detail: `median ${num(inequality.stock_value_median)}` }),
+          card({ key: 'stock_top', label: 'Stock top 10% share', value: pct(inequality.stock_value_top_decile_share), detail: `mean ${num(inequality.stock_value_mean)}` }),
+          card({ key: 'stock_level', label: 'Stock value level', value: num(inequality.stock_value_mean), detail: `median ${num(inequality.stock_value_median)}` }),
+          card({ key: 'rare_money', label: 'Rare-money share', value: pct(market.rare_goods_monetary_share), detail: `conc ${pct(market.monetary_concentration)}` }),
+          card({ key: 'value_rare_money', label: 'Value rare-money', value: pct(market.value_weighted_rare_goods_monetary_share), detail: `value conc ${pct(market.value_weighted_monetary_concentration)}` }),
+          card({ key: 'exchange_media', label: 'Exchange-media rare', value: pct(market.rare_goods_exchange_media_share), detail: `media conc ${pct(market.exchange_media_concentration)}` }),
+          card({ key: 'concentration', label: 'Monetary concentration', value: pct(market.monetary_concentration), detail: `qty rare ${pct(market.rare_goods_monetary_share)}` }),
+          card({ key: 'value_concentration', label: 'Value concentration', value: pct(market.value_weighted_monetary_concentration), detail: `value rare ${pct(market.value_weighted_rare_goods_monetary_share)}` }),
+          card({ key: 'exchange_concentration', label: 'Media concentration', value: pct(market.exchange_media_concentration), detail: `media rare ${pct(market.rare_goods_exchange_media_share)}` }),
+        ]),
+      ].join('');
 
       const p = state.phenomena || {};
       const leaders = (p.top_monetary_good_ids || []).map(id => `g${id}`).join(', ') || 'none';
+      const valueLeaders = (p.top_value_weighted_monetary_good_ids || []).map(id => `g${id}`).join(', ') || 'none';
+      const mediaLeaders = (p.top_exchange_media_good_ids || []).map(id => `g${id}`).join(', ') || 'none';
       $('phenomena').innerHTML = [
-        ['Economy', p.economy_growing ? 'Growing' : 'Flat or falling', `slope ${num(p.production_trend)}`],
-        ['Utility', p.utility_growing ? 'Growing' : 'Flat or falling', `slope ${num(p.utility_trend)}`],
-        ['Cycles', p.cycles_detected ? 'Detected' : 'Weak', p.dominant_cycle_length ? `period ${p.dominant_cycle_length}` : 'no stable lag'],
-        ['Rare goods', pct(p.rare_goods_monetary_share), 'money-role share'],
-        ['Concentration', pct(p.monetary_concentration), 'higher means fewer leaders'],
-        ['Leaders', leaders, `${p.cycles_observed || 0} cycles`],
-      ].map(([k, v, d]) => `<article class="card"><div class="k">${k}</div><div class="v" style="font-size:1.05rem">${v}</div><div class="small">${d}</div></article>`).join('');
+        { key: 'economy', label: 'Economy', value: p.economy_growing ? 'Growing' : 'Flat or falling', detail: `whole-run slope ${num(p.production_trend)}` },
+        { key: 'phenomena_utility', label: 'Utility proxy', value: p.utility_growing ? 'Growing' : 'Flat or falling', detail: `whole-run slope ${num(p.utility_trend)}` },
+        { key: 'cycles', label: 'Cycles', value: p.cycles_detected ? 'Detected' : 'Weak', detail: p.dominant_cycle_length ? `whole-run period ${p.dominant_cycle_length}` : 'no stable lag' },
+        { key: 'rare_money', label: 'Rare goods qty', value: pct(p.rare_goods_monetary_share), detail: 'quantity money-role share' },
+        { key: 'value_rare_money', label: 'Rare goods value', value: pct(p.value_weighted_rare_goods_monetary_share), detail: 'value money-role share' },
+        { key: 'exchange_media', label: 'Rare goods media', value: pct(p.rare_goods_exchange_media_share), detail: 'circulation-friction share' },
+        { key: 'concentration', label: 'Concentration', value: pct(p.monetary_concentration), detail: 'higher means fewer leaders' },
+        { key: 'leaders', label: 'Qty leaders', value: leaders, detail: `${p.cycles_observed || 0} cycles` },
+        { key: 'leaders', label: 'Value leaders', value: valueLeaders, detail: `${p.cycles_observed || 0} cycles` },
+        { key: 'leaders', label: 'Media leaders', value: mediaLeaders, detail: `${p.cycles_observed || 0} cycles` },
+      ].map(item => card({ ...item, valueStyle: 'font-size:1.05rem' })).join('');
+
+      $('recentTrendCards').innerHTML = (state.recentTrends || []).map(item => `
+        <article class="card">
+          <div class="card-head"><div class="k">Last ${item.window_cycles} cycles</div>${helpButton('recent_window', `Last ${item.window_cycles} cycles`)}</div>
+          <div class="v" style="font-size:1.05rem">${item.economy_growing ? 'Production up' : 'Production down'}</div>
+          <div class="small">utility proxy ${signedPct(item.utility_change)} | trade ${signedPct(item.trade_change)} | rare-money ${signedPct(item.rare_goods_monetary_change)} | value rare ${signedPct(item.value_weighted_rare_goods_monetary_change)} | media rare ${signedPct(item.rare_goods_exchange_media_change)}</div>
+          <div class="small mono">window ${item.from_cycle}-${item.to_cycle} | cycle ${item.dominant_cycle_length ?? 'weak'} | strength ${num(item.cycle_strength)}</div>
+        </article>
+      `).join('') || '<article class="card"><div class="k">Recent windows</div><div class="v" style="font-size:1.05rem">Not enough history</div><div class="small">Need at least two observed cycles.</div></article>';
+
+      const progress = state.progress || {};
+      const progressPct = progress.progress_share === null || progress.progress_share === undefined ? 'n/a' : pct(progress.progress_share);
+      $('progressCards').innerHTML = [
+        { key: 'progress', label: 'Progress', value: progress.target_cycle ? `${progress.current_cycle} / ${progress.target_cycle}` : `${progress.current_cycle}`, detail: `complete ${progressPct}` },
+        { key: 'checkpoint_age', label: 'Checkpoint age', value: duration(progress.checkpoint_age_seconds), detail: progress.checkpoint_updated_at ? `last checkpoint ${progress.checkpoint_updated_at}` : 'no checkpoint timestamp' },
+        { key: 'chunk_target', label: 'Chunk target', value: progress.latest_chunk_target_cycle ? `${progress.latest_chunk_from_cycle} -> ${progress.latest_chunk_target_cycle}` : 'n/a', detail: progress.runner_log_updated_at ? `runner log ${progress.runner_log_updated_at}` : 'no runner log' },
+        { key: 'eta', label: 'ETA', value: duration(progress.eta_seconds), detail: progress.recent_seconds_per_cycle !== null && progress.recent_seconds_per_cycle !== undefined ? `${num(progress.recent_seconds_per_cycle)} s/cycle` : 'throughput unavailable' },
+      ].map(item => card({ ...item, valueStyle: 'font-size:1.05rem' })).join('');
+
+      const goodLabel = item => `g${item.report_good_id ?? item.good_id}`;
 
       $('goodsTable').innerHTML = state.goods.map(item => `
         <tr class="${item.is_rare ? 'rare' : ''}">
-          <td class="mono">g${item.good_id}</td>
+          <td class="mono">${goodLabel(item)}</td>
           <td class="mono">${item.demand_rank}</td>
-          <td class="mono">${item.monetary_score.toFixed(3)}</td>
-          <td class="mono">${pct(item.purchase_breadth)}</td>
-          <td class="mono">${pct(item.inventory_acceptance_share)}</td>
+          <td class="mono">${Number(item.exchange_media_score || 0).toFixed(3)}</td>
+          <td class="mono">${num(item.relative_tce_loss)}</td>
+          <td class="mono">${pct(item.network_circulation_breadth)}</td>
+          <td class="mono">${Number(item.monetary_score || 0).toFixed(3)}</td>
+          <td class="mono">${Number(item.value_weighted_monetary_score || 0).toFixed(3)}</td>
+        </tr>
+      `).join('');
+
+      $('roleTable').innerHTML = (state.roleGoods || []).map(item => `
+        <tr class="${item.is_rare ? 'rare' : ''}">
+          <td class="mono">${goodLabel(item)}</td>
+          <td class="mono">${item.demand_rank}</td>
+          <td class="mono">${item.producer_count}</td>
+          <td class="mono">${item.retailer_count}</td>
+          <td class="mono">${item.consumer_count}</td>
+          <td class="mono">${num(item.retailer_inventory_inflow_total)}</td>
+          <td class="mono">${pct(item.retailer_stock_limit_ratio_mean)}</td>
+          <td class="mono">${pct(item.top1_producer_output_share)}</td>
+          <td class="mono">${pct(item.top_producer_output_focus_share)}</td>
+          <td class="mono">${pct(item.top_producer_time_share)}</td>
         </tr>
       `).join('');
 
       drawLine($('macroChart'), [
-        { values: state.history.map(item => item.utility_proxy_total), color: '#185f49' },
-        { values: state.history.map(item => item.production_total), color: '#aa5b32' },
+        { values: state.history.map(item => item.utility_proxy_total), color: '#185f49', normalizeToFirst: true },
+        { values: state.history.map(item => item.production_total), color: '#aa5b32', normalizeToFirst: true },
+      ]);
+      drawLine($('welfareChart'), [
+        { values: state.history.map(item => item.living_standard_median), color: '#185f49' },
+        { values: state.history.map(item => item.living_standard_mean), color: '#aa5b32' },
+        { values: state.history.map(item => item.living_standard_p10), color: '#9b3a31' },
+        { values: state.history.map(item => item.living_standard_p90), color: '#4f6f94' },
       ]);
       drawLine($('tradeChart'), [
         { values: state.history.map(item => item.accepted_trade_volume), color: '#213128' },
@@ -362,16 +659,26 @@
       ]);
       drawLine($('moneyChart'), [
         { values: state.history.map(item => item.rare_goods_monetary_share), color: '#844719' },
+        { values: state.history.map(item => item.value_weighted_rare_goods_monetary_share), color: '#c58b37' },
+        { values: state.history.map(item => item.rare_goods_exchange_media_share), color: '#4f6f94' },
         { values: state.history.map(item => item.monetary_concentration), color: '#185f49' },
       ]);
       drawBars($('goodsChart'), state.goods);
     }
 
     function syncForm() {
+      const readOnly = Boolean(state.status?.read_only);
+      const exactLegacy = Boolean(state.status?.config?.use_exact_legacy_mechanics);
+      ['backend', 'batchCycles', 'population', 'goods', 'acquaintances', 'seed', 'stepCycles', 'startBtn', 'pauseBtn', 'stepBtn', 'resetBtn'].forEach(id => {
+        $(id).disabled = readOnly;
+      });
+      ['activeAcquaintances', 'demandCandidates', 'supplyCandidates'].forEach(id => {
+        $(id).disabled = readOnly || exactLegacy;
+      });
       const c = state.status?.config;
       if (!c) return;
       $('backend').value = state.status.backend_name || 'numpy';
-      $('batchCycles').value = state.status.batch_cycles || 1;
+      $('batchCycles').value = state.status.batch_cycles ?? 1;
       $('population').value = c.population;
       $('goods').value = c.goods;
       $('acquaintances').value = c.acquaintances;
@@ -390,7 +697,18 @@
       const pad = { top: 16, right: 16, bottom: 22, left: 24 };
       const uw = w - pad.left - pad.right;
       const uh = h - pad.top - pad.bottom;
-      const values = series.flatMap(item => item.values).filter(value => Number.isFinite(value));
+      const prepared = series.map(item => {
+        const values = (item.values || []).map(value => Number(value)).filter(value => Number.isFinite(value));
+        if (!item.normalizeToFirst || !values.length) {
+          return { color: item.color, values };
+        }
+        const base = values.find(value => Math.abs(value) > 1e-9) ?? values[0] ?? 1;
+        return {
+          color: item.color,
+          values: values.map(value => (value / base) * 100.0),
+        };
+      });
+      const values = prepared.flatMap(item => item.values).filter(value => Number.isFinite(value));
       if (!values.length) {
         ctx.fillStyle = 'rgba(33,49,40,0.5)';
         ctx.font = '14px Consolas';
@@ -408,7 +726,7 @@
         ctx.lineTo(w - pad.right, y);
         ctx.stroke();
       }
-      series.forEach(item => {
+      prepared.forEach(item => {
         ctx.strokeStyle = item.color;
         ctx.lineWidth = 2.3;
         ctx.beginPath();
@@ -435,17 +753,19 @@
         return;
       }
       const left = 64;
-      const max = Math.max(...goods.map(item => item.monetary_score), 0.001);
+      const scoreOf = item => Number(item.exchange_media_score ?? item.value_weighted_monetary_score ?? item.monetary_score ?? 0);
+      const max = Math.max(...goods.map(item => scoreOf(item)), 0.001);
       const row = Math.max(14, Math.floor((h - 24) / goods.length) - 4);
       goods.forEach((item, index) => {
         const y = 14 + index * (row + 4);
-        const width = ((w - left - 24) * item.monetary_score) / max;
+        const score = scoreOf(item);
+        const width = ((w - left - 24) * score) / max;
         ctx.fillStyle = item.is_rare ? '#844719' : '#185f49';
         ctx.fillRect(left, y, Math.max(width, 1), row);
         ctx.fillStyle = '#213128';
         ctx.font = '12px Consolas';
-        ctx.fillText(`g${item.good_id}`, 16, y + row - 1);
-        ctx.fillText(item.monetary_score.toFixed(3), left + Math.max(width + 8, 10), y + row - 1);
+        ctx.fillText(goodLabel(item), 16, y + row - 1);
+        ctx.fillText(score.toFixed(3), left + Math.max(width + 8, 10), y + row - 1);
       });
     }
 
@@ -458,6 +778,19 @@
       const box = $('errorBox');
       box.textContent = '';
       box.classList.remove('visible');
+    }
+    function openHelp(key) {
+      const entry = helpText[key];
+      if (!entry) return;
+      $('helpTitle').textContent = entry[0];
+      $('helpText').textContent = entry[1];
+      $('helpOverlay').classList.add('visible');
+      $('helpOverlay').setAttribute('aria-hidden', 'false');
+      $('helpClose').focus();
+    }
+    function closeHelp() {
+      $('helpOverlay').classList.remove('visible');
+      $('helpOverlay').setAttribute('aria-hidden', 'true');
     }
     function payload() {
       return {
@@ -486,6 +819,18 @@
     $('pauseBtn').addEventListener('click', () => postJson('/api/pause'));
     $('stepBtn').addEventListener('click', () => postJson('/api/step', { cycles: Number($('stepCycles').value) || 1 }));
     $('resetBtn').addEventListener('click', () => postJson('/api/reset', payload()));
+    $('helpClose').addEventListener('click', closeHelp);
+    $('helpOverlay').addEventListener('click', event => {
+      if (event.target === $('helpOverlay')) closeHelp();
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') closeHelp();
+    });
+    document.addEventListener('click', event => {
+      const trigger = event.target.closest?.('[data-help-key]');
+      if (!trigger) return;
+      openHelp(trigger.getAttribute('data-help-key'));
+    });
     refresh();
     setInterval(refresh, 800);
   </script>

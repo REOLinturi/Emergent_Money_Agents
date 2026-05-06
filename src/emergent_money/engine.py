@@ -60,7 +60,14 @@ class SimulationEngine:
         return snapshot
 
     def snapshot_metrics(self) -> MetricsSnapshot:
-        monetary_concentration, rare_goods_monetary_share = compute_monetary_aggregates(self.state, self.backend)
+        (
+            monetary_concentration,
+            rare_goods_monetary_share,
+            value_weighted_monetary_concentration,
+            value_weighted_rare_goods_monetary_share,
+            exchange_media_concentration,
+            rare_goods_exchange_media_share,
+        ) = compute_monetary_aggregates(self.state, self.backend)
         return compute_metrics(
             cycle=self.cycle,
             state=self.state,
@@ -77,6 +84,10 @@ class SimulationEngine:
             network_density=self._network_density(),
             monetary_concentration=monetary_concentration,
             rare_goods_monetary_share=rare_goods_monetary_share,
+            value_weighted_monetary_concentration=value_weighted_monetary_concentration,
+            value_weighted_rare_goods_monetary_share=value_weighted_rare_goods_monetary_share,
+            exchange_media_concentration=exchange_media_concentration,
+            rare_goods_exchange_media_share=rare_goods_exchange_media_share,
         )
 
     def _base_need_total(self) -> float:
@@ -95,6 +106,9 @@ class SimulationEngine:
         self.state.recent_sales *= self.config.activity_discount
         self.state.recent_purchases *= self.config.activity_discount
         self.state.recent_inventory_inflow *= self.config.activity_discount
+        self.state.recent_purchase_value *= self.config.activity_discount
+        self.state.recent_sales_value *= self.config.activity_discount
+        self.state.recent_inventory_inflow_value *= self.config.activity_discount
         self.state.trade.active_friend_slot[...] = -1
         self.state.trade.active_friend_id[...] = -1
         self.state.trade.proposal_friend_slot[...] = -1

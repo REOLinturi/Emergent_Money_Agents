@@ -41,11 +41,14 @@ def run_native_behavior_comparison(
     backend_name: str = 'numpy',
     output_path: str | Path | None = None,
     tolerances: dict[str, float] | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> dict[str, Any]:
     if cycles <= 0:
         raise ValueError('cycles must be positive')
     if not seeds:
         raise ValueError('seeds must not be empty')
+    if max_runtime_seconds is not None and max_runtime_seconds < 0.0:
+        raise ValueError('max_runtime_seconds must be non-negative')
 
     resolved_tolerances = dict(_DEFAULT_TOLERANCES)
     if tolerances is not None:
@@ -66,6 +69,7 @@ def run_native_behavior_comparison(
         metric: {'seed': None, 'cycle': None, 'delta': 0.0}
         for metric in _BEHAVIOR_METRICS
     }
+    stop_reason: str | None = None
 
     for seed in seeds:
         reference_engine = SimulationEngine.create(
@@ -76,11 +80,10 @@ def run_native_behavior_comparison(
             config=_target_compare_config(config, seed=seed),
             backend_name=backend_name,
         )
-        if config.experimental_native_exchange_stage:
-            setattr(target_engine, '_allow_rejected_native_exchange_stage', True)
 
         first_behavioral_mismatch: dict[str, Any] | None = None
         final_deltas = {metric: 0.0 for metric in _BEHAVIOR_METRICS}
+        cycles_completed = 0
         for cycle_index in range(1, cycles + 1):
             reference_started = time.perf_counter()
             reference_snapshot = reference_engine.step()
@@ -92,6 +95,7 @@ def run_native_behavior_comparison(
 
             deltas = _snapshot_deltas(reference_snapshot, target_snapshot)
             final_deltas = deltas
+            cycles_completed = cycle_index
             _update_peak_abs_delta(peak_abs_delta, deltas, seed=seed, cycle=cycle_index)
             if first_behavioral_mismatch is None:
                 exceeded = {
@@ -111,17 +115,22 @@ def run_native_behavior_comparison(
                             'deltas': exceeded,
                         }
                     )
+            if max_runtime_seconds is not None and (time.perf_counter() - started_at) >= max_runtime_seconds:
+                stop_reason = 'max_runtime_seconds'
+                break
 
         final_delta_rows.append(final_deltas)
         per_seed.append(
             {
                 'seed': seed,
                 'cycles_requested': cycles,
-                'cycles_completed': cycles,
+                'cycles_completed': cycles_completed,
                 'first_behavioral_mismatch': first_behavioral_mismatch,
                 'final_deltas': final_deltas,
             }
         )
+        if stop_reason is not None:
+            break
 
     speedup = 0.0
     if total_target_seconds > 0.0:
@@ -132,8 +141,16 @@ def run_native_behavior_comparison(
         'seeds': seeds,
         'config': asdict(config),
         'behavior_tolerances': resolved_tolerances,
+        'stopped_early': stop_reason is not None,
+        'stop_reason': stop_reason,
+        'completed_seed_count': sum(1 for item in per_seed if item['cycles_completed'] == cycles),
         'mismatch_count': len(mismatches),
-        'matched_seed_count': sum(1 for item in per_seed if item['first_behavioral_mismatch'] is None),
+        'matched_seed_count': sum(
+            1
+            for item in per_seed
+            if item['cycles_completed'] == cycles and item['first_behavioral_mismatch'] is None
+        ),
+        'matched_observed_seed_count': sum(1 for item in per_seed if item['first_behavioral_mismatch'] is None),
         'per_seed': per_seed,
         'mismatch_examples': mismatches[:10],
         'mean_final_delta': _mean_delta_rows(final_delta_rows),

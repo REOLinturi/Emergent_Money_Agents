@@ -12,7 +12,7 @@ from emergent_money.hybrid_batching import batch_is_conflict_free
 from emergent_money.legacy_cycle import LegacyCycleRunner
 from emergent_money import legacy_search_backend
 from emergent_money.legacy_search_backend import ExchangePlanRequest, ExchangeSearchRequest, NativeModuleExchangeSearchBackend, build_exchange_search_backend
-from emergent_money.state import ROLE_CONSUMER, ROLE_RETAILER
+from emergent_money.state import ROLE_CONSUMER, ROLE_PRODUCER, ROLE_RETAILER
 
 
 def test_exact_legacy_step_generates_transaction_cost_waste() -> None:
@@ -51,6 +51,67 @@ def test_exact_legacy_step_generates_transaction_cost_waste() -> None:
     assert snapshot.accepted_trade_count > 0
     assert snapshot.periodic_tce_cost_total > 0.0
     assert snapshot.tce_cost_in_time_total > 0.0
+    assert float(np.sum(state.recent_purchase_value)) > 0.0
+    assert float(np.sum(state.recent_sales_value)) > 0.0
+
+
+def test_local_liquidity_surplus_buffer_requires_observed_friend_acceptance() -> None:
+    config = SimulationConfig(
+        population=2,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_local_liquidity_stock_bias=2.0,
+        experimental_local_liquidity_min_sales=1.0,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.friend_id[...] = np.array([[1], [0]], dtype=np.int32)
+    state.transparency[...] = 0.8
+    state.needs_level[...] = 1.0
+    state.stock_limit[0, 1] = 2.0
+    state.recent_sales[0, 1] = 4.0
+    state.recent_purchases[0, 1] = 4.0
+
+    base_limit = float(state.stock_limit[0, 1])
+    assert runner._surplus_target_stock_limit(0, 1) == pytest.approx(base_limit)
+
+    state.friend_sold[0, 0, 1] = 2.0
+
+    assert runner._surplus_target_stock_limit(0, 1) > base_limit
+
+
+def test_local_liquidity_surplus_buffer_scales_from_observed_intermediary_flow() -> None:
+    config = SimulationConfig(
+        population=2,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_local_liquidity_stock_bias=2.0,
+        experimental_local_liquidity_min_sales=1.0,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.friend_id[...] = np.array([[1], [0]], dtype=np.int32)
+    state.transparency[...] = 1.0
+    state.needs_level[...] = 1.0
+    state.market.elastic_need[...] = np.array([1.0, 100.0], dtype=np.float32)
+    state.stock_limit[0, :] = 2.0
+
+    state.friend_sold[0, 0, 0] = 30.0
+    state.recent_sales[0, 0] = 30.0
+    state.recent_purchases[0, 0] = 30.0
+
+    assert runner._surplus_target_stock_limit(0, 0) > 50.0
+    assert runner._surplus_target_stock_limit(0, 1) == pytest.approx(2.0)
 
 
 def test_end_agent_period_spoils_stock_above_threshold() -> None:
@@ -115,6 +176,399 @@ def test_leisure_round_adds_capped_temporary_extra_need() -> None:
     assert np.isclose(engine._leisure_extra_need_total, float(expected_extra.sum()))
     assert np.allclose(state.need[0], 0.0)
     assert state.recent_needs_increment[0] > 1.1
+
+
+def test_exact_need_production_is_limited_by_available_time() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.need[0] = np.array([10.0, 20.0], dtype=np.float32)
+    state.efficiency[0] = np.array([1.0, 2.0], dtype=np.float32)
+    state.time_remaining[0] = 10.0
+    state.recent_production[0] = 0.0
+    state.produced_this_period[0] = 0.0
+
+    runner._produce_need(0)
+
+    assert np.allclose(state.produced_this_period[0], np.array([5.0, 10.0], dtype=np.float32))
+    assert np.allclose(state.need[0], np.array([5.0, 10.0], dtype=np.float32))
+    assert float(state.time_remaining[0]) == pytest.approx(0.0)
+    assert int(state.timeout[0]) == 1
+
+
+def test_exact_agent_period_fails_when_time_limited_need_remains() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.need[0, 0] = 10.0
+    state.efficiency[0, 0] = 1.0
+    state.time_remaining[0] = 5.0
+    state.recent_production[0, 0] = 0.0
+    state.produced_this_period[0, 0] = 0.0
+
+    runner._advance_agent_to_surplus_stage(0)
+
+    assert bool(state.period_failure[0])
+    assert float(state.need[0, 0]) == pytest.approx(5.0)
+    assert float(state.time_remaining[0]) == pytest.approx(0.0)
+
+
+def test_exact_legacy_agent_cycle_skips_extra_demand_round_by_default() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    calls: list[int] = []
+
+    def _record(agent_id: int) -> None:
+        calls.append(agent_id)
+
+    runner._run_leisure_round = _record  # type: ignore[method-assign]
+    runner._run_agent_cycle(0)
+
+    assert calls == []
+
+
+def test_exact_legacy_agent_cycle_can_opt_in_extra_demand_round() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        legacy_extra_demand_round=True,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    calls: list[int] = []
+
+    def _record(agent_id: int) -> None:
+        calls.append(agent_id)
+
+    runner._run_leisure_round = _record  # type: ignore[method-assign]
+    runner._run_agent_cycle(0)
+
+    assert calls == [0]
+
+
+def test_exact_purchase_price_can_drop_below_old_floor_by_default() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 1000.0
+    state.stock_limit[0, 0] = 1.0
+    state.purchase_times[0, 0] = 1
+    state.purchase_price[0, 0] = 0.051
+
+    runner._adjust_purchase_price(0, 0)
+
+    assert float(state.purchase_price[0, 0]) < 0.05
+
+
+def test_exact_purchase_price_respects_optional_legacy_floor() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        legacy_price_floor=0.05,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 1000.0
+    state.stock_limit[0, 0] = 1.0
+    state.purchase_times[0, 0] = 1
+    state.purchase_price[0, 0] = 0.051
+
+    runner._adjust_purchase_price(0, 0)
+
+    assert float(state.purchase_price[0, 0]) == pytest.approx(0.05)
+
+
+def test_use_value_price_floor_anchors_to_focused_cost_when_inventory_is_useful() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.efficiency[0, 0] = 2.0
+    state.stock[0, 0] = 1.0
+    state.stock_limit[0, 0] = 100.0
+    state.market.elastic_need[0] = 10.0
+    state.purchase_price[0, 0] = 0.0
+    state.sales_price[0, 0] = 0.0
+
+    runner._adjust_purchase_price(0, 0)
+
+    expected_floor = 0.5
+    assert float(state.purchase_price[0, 0]) == pytest.approx(expected_floor)
+    assert float(state.sales_price[0, 0]) == pytest.approx(expected_floor / config.price_reduction)
+
+
+def test_use_value_price_floor_falls_with_visible_inventory_overhang() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.efficiency[0, 0] = 2.0
+    state.stock[0, 0] = 1000.0
+    state.stock_limit[0, 0] = 1.0
+    state.market.elastic_need[0] = 1.0
+    state.needs_level[0] = 1.0
+
+    survival_fraction = (1.0 - config.spoilage_rate) ** config.history
+    visible_capacity = max(
+        config.history * float(state.market.elastic_need[0]),
+        float(state.stock_limit[0, 0]),
+        config.min_trade_quantity,
+    )
+    expected_floor = 0.5 * ((visible_capacity / survival_fraction) / float(state.stock[0, 0]))
+
+    assert runner._minimum_price_floor(0, 0, production_cost=0.5) == pytest.approx(expected_floor)
+
+
+def test_retailer_purchase_price_keeps_resale_margin_when_scarce() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 0.0
+    state.stock_limit[0, 0] = 100.0
+    state.purchase_price[0, 0] = 8.0
+    state.sales_price[0, 0] = 8.0
+    state.purchased_this_period[0, 0] = 0.0
+    state.sold_this_period[0, 0] = 4.0
+
+    runner._adjust_purchase_price(0, 0)
+
+    assert float(state.purchase_price[0, 0]) == pytest.approx(8.0 * config.price_reduction)
+
+
+def test_retailer_purchase_price_rises_when_bought_goods_sell_through_with_margin() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 0.0
+    state.stock_limit[0, 0] = 100.0
+    state.purchase_price[0, 0] = 8.0
+    state.sales_price[0, 0] = 10.0
+    state.purchased_this_period[0, 0] = 4.0
+    state.sold_this_period[0, 0] = 4.0
+
+    runner._adjust_purchase_price(0, 0)
+
+    assert float(state.purchase_price[0, 0]) == pytest.approx(8.0 * config.price_hike)
+
+
+def test_retailer_purchase_price_falls_when_buying_more_than_selling() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 0.0
+    state.stock_limit[0, 0] = 100.0
+    state.purchase_price[0, 0] = 8.0
+    state.sales_price[0, 0] = 10.0
+    state.purchased_this_period[0, 0] = 10.0
+    state.sold_this_period[0, 0] = 4.0
+
+    runner._adjust_purchase_price(0, 0)
+
+    assert float(state.purchase_price[0, 0]) == pytest.approx(8.0 * config.price_reduction)
+
+
+def test_retailer_sales_price_falls_when_no_sales_despite_inventory() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 2.0
+    state.stock_limit[0, 0] = 100.0
+    state.market.elastic_need[0] = 3.0
+    state.purchase_price[0, 0] = 8.0
+    state.sales_price[0, 0] = 10.0
+    state.sales_times[0, 0] = 0
+    state.sold_this_period[0, 0] = 0.0
+
+    runner._adjust_sales_price(0, 0)
+
+    assert float(state.sales_price[0, 0]) == pytest.approx(10.0 * config.price_reduction)
+    assert float(state.purchase_price[0, 0]) == pytest.approx(8.0)
+
+
+def test_retailer_sales_price_reduction_keeps_purchase_below_sales() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_RETAILER
+    state.stock[0, 0] = 2.0
+    state.stock_limit[0, 0] = 100.0
+    state.purchase_price[0, 0] = 9.7
+    state.sales_price[0, 0] = 10.0
+    state.sold_this_period[0, 0] = 0.0
+    state.market.elastic_need[0] = 1.0
+
+    runner._adjust_sales_price(0, 0)
+
+    expected_sales = 10.0 * config.price_reduction
+    assert float(state.sales_price[0, 0]) == pytest.approx(expected_sales)
+    assert float(state.purchase_price[0, 0]) == pytest.approx(expected_sales * config.price_reduction)
+
+
+def test_producer_normal_stock_low_sales_sets_sales_price_to_cost() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_PRODUCER
+    state.efficiency[0, 0] = 1.0
+    state.stock[0, 0] = 2.0
+    state.stock_limit[0, 0] = 100.0
+    state.market.elastic_need[0] = 1.0
+    state.sales_price[0, 0] = 10.0
+    state.sold_this_period[0, 0] = 0.0
+
+    runner._adjust_sales_price(0, 0)
+
+    assert float(state.sales_price[0, 0]) == pytest.approx(1.0)
+
+
+def test_producer_large_unsold_stock_discounts_after_reaching_cost() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+    runner = LegacyCycleRunner(engine)
+
+    state.role[0, 0] = ROLE_PRODUCER
+    state.efficiency[0, 0] = 1.0
+    state.stock[0, 0] = 200.0
+    state.stock_limit[0, 0] = 100.0
+    state.market.elastic_need[0] = 1.0
+    state.sales_price[0, 0] = 10.0
+    state.sold_this_period[0, 0] = 0.0
+
+    runner._adjust_sales_price(0, 0)
+    assert float(state.sales_price[0, 0]) == pytest.approx(1.0)
+
+    runner._adjust_sales_price(0, 0)
+    assert float(state.sales_price[0, 0]) == pytest.approx(config.price_reduction)
 
 
 def test_friend_slot_cache_tracks_replacement_without_semantic_drift() -> None:

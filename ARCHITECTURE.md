@@ -96,7 +96,7 @@ The following behaviors are intentionally aligned with the original report and l
 - surplus production is restricted to talented goods in the current paper-aligned path
 - surplus-good choice is ranked by current efficiency and private sales price
 - learned efficiency may later exceed the initial talent advantage
-- the cycle contains a second, leisure-driven demand round after the first basic-needs round
+- the legacy-faithful cycle does not run a second leisure-demand round; leftover time is used in later leisure production, and the older extra-demand round is retained only as an opt-in diagnostic path
 - the second round allows barter into inventory room, not only into immediate unmet need
 
 Important note:
@@ -116,7 +116,7 @@ The deterministic reference path currently uses this order:
    - produce for remaining need
    - introduce one explored random acquaintance candidate and replace an empty or least-active slot if needed
    - produce surplus to stock
-3. if leisure time remains, add temporary extra demand using the paper's `needsincrement` idea with market-level price-elastic weighting
+3. if leisure time remains, carry the signal into later `needslevel` updates and use leftover time in leisure production; the older temporary extra-demand round is no longer part of the default exact legacy path
 4. run a second market round with the same exhaustive known-network barter scan, now allowing trade either for immediate need or for inventory room
 5. update learning-based efficiency, spoilage, and private prices
 
@@ -183,6 +183,17 @@ Required examples:
 
 These cases guard against silent model drift.
 
+### Numerical tolerance principle
+
+Bit-for-bit parity is useful for isolating implementation errors, especially when moving exact-path stages from Python to Rust. It is not itself a model requirement. Numerical differences that are at least an order of magnitude smaller than the relevant transaction-cost-of-exchange (TCE) signal are treated as behaviorally immaterial for the economic model, provided they do not change discrete choices such as partner selection, accepted-trade counts, role transitions, or long-horizon phenomena.
+
+Discrete choices also have a practical tie region. If two barter candidates differ only by a margin that is itself far below the TCE signal, exact agreement on which candidate wins is not economically meaningful. Validation should still report the tie, but classify it separately from a substantive heuristic or accounting error. A candidate-choice mismatch is material when the losing/winning score gap is large enough to represent a real modeled preference, or when many borderline differences accumulate into changed macro phenomena.
+
+Optimization acceptance therefore uses two gates:
+
+- exact/parity gate: required for code that is advertised as the exact reference-compatible path
+- phenomenon gate: acceptable for explicitly experimental or realism-oriented paths when residual numerical drift is far below TCE scale and macro phenomena remain robust
+
 ## Backend Decision
 
 The chosen backend strategy is:
@@ -247,7 +258,7 @@ The current codebase includes:
 - exhaustive barter scoring across all known acquaintances and all good pairs on the CPU reference path
 - the same exhaustive barter scoring on CUDA through a blocked friend-and-goods scan
 - stock-room-aware second-round barter resolution
-- leisure-driven temporary demand extension
+- optional leisure-driven temporary demand extension for diagnostics; not part of the default exact legacy path
 - service-layer snapshots
 - cycle-level market metrics aggregated across all trade rounds
 

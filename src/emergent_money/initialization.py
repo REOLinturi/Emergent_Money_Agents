@@ -56,6 +56,9 @@ def create_initial_state(config: SimulationConfig, backend: BaseBackend) -> Simu
     purchased_this_period = np.zeros(config.agent_good_shape, dtype=np.float32)
     purchased_last_period = np.zeros(config.agent_good_shape, dtype=np.float32)
     recent_inventory_inflow = np.zeros(config.agent_good_shape, dtype=np.float32)
+    recent_purchase_value = np.zeros(config.agent_good_shape, dtype=np.float32)
+    recent_sales_value = np.zeros(config.agent_good_shape, dtype=np.float32)
+    recent_inventory_inflow_value = np.zeros(config.agent_good_shape, dtype=np.float32)
     purchase_times = np.zeros(config.agent_good_shape, dtype=np.int32)
     sales_times = np.zeros(config.agent_good_shape, dtype=np.int32)
     sum_period_purchase_value = np.full(config.agent_good_shape, config.initial_price, dtype=np.float32)
@@ -130,6 +133,9 @@ def create_initial_state(config: SimulationConfig, backend: BaseBackend) -> Simu
         purchased_this_period=backend.asarray(purchased_this_period, dtype=np.float32),
         purchased_last_period=backend.asarray(purchased_last_period, dtype=np.float32),
         recent_inventory_inflow=backend.asarray(recent_inventory_inflow, dtype=np.float32),
+        recent_purchase_value=backend.asarray(recent_purchase_value, dtype=np.float32),
+        recent_sales_value=backend.asarray(recent_sales_value, dtype=np.float32),
+        recent_inventory_inflow_value=backend.asarray(recent_inventory_inflow_value, dtype=np.float32),
         spoilage=backend.asarray(spoilage, dtype=np.float32),
         periodic_spoilage=backend.asarray(periodic_spoilage, dtype=np.float32),
         talent_mask=backend.asarray(talent_mask, dtype=np.float32),

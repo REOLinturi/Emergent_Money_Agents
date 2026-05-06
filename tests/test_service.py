@@ -25,6 +25,8 @@ def test_service_exposes_snapshots_without_raw_backend_arrays() -> None:
     assert snapshots[0].accepted_trade_count >= 0
     assert snapshots[0].production_total > 0.0
     assert 0.0 <= snapshots[0].rare_goods_monetary_share <= 1.0
+    assert 0.0 <= snapshots[0].value_weighted_rare_goods_monetary_share <= 1.0
+    assert 0.0 <= snapshots[0].rare_goods_exchange_media_share <= 1.0
 
     agent = service.get_agent_snapshot(0)
     assert len(agent.need) == config.goods
@@ -53,11 +55,26 @@ def test_service_exposes_history_goods_and_phenomena_snapshots() -> None:
     goods = service.get_goods_snapshot(limit=4)
     phenomena = service.get_phenomena_snapshot(top_goods=4)
     report = service.run_experiment(0, top_goods=4)
+    inequality = service.get_inequality_snapshot()
 
     assert len(history) == 3
     assert len(goods) == 4
     assert all(goods[idx].monetary_score >= goods[idx + 1].monetary_score for idx in range(len(goods) - 1))
+    value_goods = service.get_goods_snapshot(limit=4, sort_by="value_weighted_monetary_score")
+    assert all(
+        value_goods[idx].value_weighted_monetary_score >= value_goods[idx + 1].value_weighted_monetary_score
+        for idx in range(len(value_goods) - 1)
+    )
     assert phenomena.cycles_observed == 4
     assert 0.0 <= phenomena.rare_goods_monetary_share <= 1.0
+    assert 0.0 <= phenomena.value_weighted_rare_goods_monetary_share <= 1.0
+    assert 0.0 <= phenomena.rare_goods_exchange_media_share <= 1.0
+    assert 0.0 <= inequality.stock_value_gini <= 1.0
+    assert 0.0 <= inequality.stock_value_top_decile_share <= 1.0
+    assert 0.0 <= inequality.living_standard_gini <= 1.0
+    assert 0.0 <= inequality.living_standard_top_decile_share <= 1.0
+    assert inequality.living_standard_p90 >= inequality.living_standard_p10
+    assert inequality.smith_cost_median >= 0.0
+    assert inequality.friction_share_of_output_value >= 0.0
     assert report.latest_market.cycle == 4
     assert len(report.goods) == 4

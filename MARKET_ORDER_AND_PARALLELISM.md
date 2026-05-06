@@ -101,13 +101,36 @@ In that world, many agents can perform read-only work in parallel without changi
 
 Even then, scarce inventory still has to be committed in some conflict-resolving order. But the amount of safe pre-commit parallel work becomes much larger.
 
+## Opportunity Sets and Realistic Search
+
+The project should not treat arbitrary candidate pruning as a neutral optimization.
+
+For a primitive barter setting, it is plausible that a trader cannot know the whole society. It is also plausible, once a trader is interacting with known acquaintances, that the trader can inspect what those acquaintances hold and compare all relevant goods before making one decision. That latter assumption supports a full local search over known counterparties and goods.
+
+Therefore:
+
+- reducing the number of goods or counterparties considered is a model assumption, not just an implementation detail
+- such reduction is acceptable only when it represents a named behavioral mechanism, for example bounded attention, incomplete display of stock, search cost, reputation filters, or institutional market rules
+- if the purpose is to preserve the broad real-world barter analogy, speedups should come first from parallel evaluation of the same opportunity set
+- full-search basket evaluation is a plausible realism path even though it differs from the exact legacy implementation
+
+This makes the engineering target clear: keep mutable trade commit controlled, but parallelize read-only opportunity evaluation and best-offer reductions as aggressively as the hardware allows.
+
+## Information Boundary
+
+Parallel or richer heuristic paths must not give agents a global market view.
+
+An agent may use its own stock, needs, prices, and direct trading history, plus observations from attempted or completed trades with known acquaintances. It may infer local acceptability if its own direct friends have accepted a good often enough. It may not read population-level money scores, global role counts, market-wide prices, or dashboard aggregates.
+
+This boundary is part of the realism constraint. It allows a trader to inspect and compare locally visible opportunities, but prevents a hidden auctioneer or statistical office from entering the primitive barter model.
+
 ## Practical Engineering Rule
 
 Current rule:
 
 - keep trade commit sequential in the exact reference path
 - finish the Rust sequential exact core first
-- only then explore parallelism around read-only search, scoring, and reductions
+- explore parallelism around read-only search, scoring, and reductions before considering any behavior-changing pruning
 
 Future rule once richer market institutions are modeled:
 
@@ -122,3 +145,81 @@ The accepted interpretation is therefore:
 - the sequential exact path is the best current model of primitive barter dynamics
 - faster speculative paths are useful as experiments, not as automatic replacements
 - more aggressive parallelism may become appropriate later if the modeled economy itself acquires posted-price and intermediary-like behavior
+
+## Implemented Phenomenon-Screening Paths
+
+The repository now has two phenomenon-screening paths. The old wave-based path remains available for rollback and comparison, but is marked deprecated. New exploratory phenomenon runs should use `--experimental-session-clearing-phenomenon-exchange`.
+
+Neither path is the exact reference. Both keep the information boundary local but change the timing model.
+
+### Deprecated wave path
+
+`--experimental-parallel-phenomenon-exchange` is the deprecated wave path:
+
+- all active agents in the wave evaluate locally visible exchange opportunities from the same read-only snapshot
+- candidate scoring and best-offer reductions are performed in Rust with Rayon across agents
+- the scheduler keeps at most one committed decision per agent per wave
+- Rust materializes only each active agent's best next proposal for the scheduler; it still searches the full local opportunity set before that reduction
+- after each wave, active-agent continuation is determined by the next Rust planning pass rather than by a Python full-goods surplus scan. This keeps the same local information boundary while avoiding a redundant `agents * goods * waves` Python bottleneck.
+- candidates sharing a proposer or partner are treated as conflicts and discarded or retried in the next wave
+- the actual state mutation still uses the same exchange execution semantics for the scheduled conflict-free trades
+- preparation, need production, surplus production, leisure, and period-end arithmetic use existing native helpers where they have isolated parity coverage. The exact path remains separately gated before any such helper is promoted to strict reference use.
+- the entire phenomenon exchange stage can now be executed inside Rust, so Python no longer loops over every conflict-resolution wave. This is still not enough for the largest `100`-good probes when the market creates thousands of sequential surplus waves. The next large speed gain is therefore a model-level timing choice, such as bilateral session clearing, not another Python-overhead cleanup.
+
+This path is kept only as a validation baseline while the session-clearing path is tested. It should not accumulate new production features unless needed for comparison.
+
+### Session-clearing path
+
+`--experimental-session-clearing-phenomenon-exchange` is the new preferred realism path:
+
+- all active agents first enter the relevant decision stage
+- each agent then runs a local trading session over its known acquaintances and goods
+- the agent may compare the locally visible opportunity set rather than repeatedly seeing one fixed friend/good pair at a time
+- every candidate trade is revalidated against current stock, need, price, transparency, and capacity before commit
+- stale or no-longer-profitable candidates are skipped rather than committed from an obsolete snapshot
+- no agent receives global money scores, market-wide prices, role counts, or dashboard aggregates
+
+The current implementation builds one ranked local shopping list per session stage, commits feasible candidates in that order, and does not rebuild the whole local basket after every accepted trade. This is the main speed distinction from the deprecated wave path. It is a semantic replacement candidate, not an exact replay path. If no anomalies appear, the wave path should be removed rather than maintained indefinitely.
+
+With no explicit hybrid parameters, both phenomenon paths use a population-wide frontier, disable frontier-partner blocking, and run both the consumption and surplus exchange stages. This makes them suitable for large exploratory runs where the goal is phenomenon-level screening rather than event-exact replay.
+
+### Basket completion and re-planning diagnostics
+
+The 100-good probes exposed a failure mode that was mostly hidden at 30 goods: agents can accumulate large aggregate inventories while many individual consumption baskets remain incomplete. The practical symptom is rising physical production without a corresponding rise in living-standard metrics.
+
+Two mechanisms were identified:
+
+- Surplus exchange needs an explicit, local, own-consumption motive. The optional `--experimental-aspirational-stock-target N` gives an agent a reason to trade surplus goods for missing goods in its own future consumption buffer, up to `N` times current own need. This does not give the agent any global information.
+- A single precomputed shopping list can become too stale. If the list is not rebuilt often enough, high-scoring early trades can leave later basket gaps without usable fallback trades.
+
+Current implementation status:
+
+- `--experimental-session-replan-passes N` rebuilds the local shopping list for each agent session up to `N` times. This is the current practical speed/quality control.
+- `--experimental-session-replan-after-trade` rebuilds the local shopping list after each accepted barter decision inside Rust. This is semantically closest to one decision at a time, but current probes show it is much slower and not clearly better than a bounded multi-pass session for large screening runs.
+- `--experimental-session-candidate-depth N` keeps up to `N` locally ranked alternatives for each need-good in the one-agent basket shopping list. It is still local-information only: the active agent ranks opportunities visible through its own acquaintance links, then commits feasible trades from that local list. `1` preserves the original fast session-clearing behavior.
+- Failed revalidation does not immediately force a rebuild; the agent can continue the same local shopping list because no inventory state changed.
+
+Empirical probe notes:
+
+- `100 agents / 100 goods / 50 acquaintances / 80 cycles`, aspirational target `2.0`: one session pass reached utility about `2.42`; eight session passes reached about `4.80`; after-trade replan reached about `4.83` but was much slower; full serial basket planning with native stage math reached about `5.59`.
+- `300 agents / 100 goods / 50 acquaintances / 200 cycles`, aspirational target `2.0`: one pass still left the median agent with many zero-stock goods and utility about `2.35`; eight passes reached utility about `9.04`, median zero-stock goods `0`, and median current-basket completion about `0.99`.
+- `3000 agents / 100 goods / 100 acquaintances`, aspirational target `2.0`, eight session passes: the first 100 cycles took about 519 seconds and reached utility about `5.59`; a continued run reached cycle `1025` with utility about `5.36`, rare-goods monetary share about `0.91`, value-weighted rare-goods monetary share about `0.61`, median zero-stock goods `0`, and median current-basket completion about `0.99`. The 525-1025 interval was mildly declining, so this path shows a plausible post-growth/adjustment phase rather than monotone early growth.
+- Candidate-depth probes, aspirational target `2.0`: at `100/100/50` for `80` cycles, depth `4` completed median baskets while running about `1.8x` faster than eight replan passes; depth `8` was still faster but did not clearly beat depth `4` in basket completion. At `3000/100/100` for `40` cycles, depth `4` took about `2.28` seconds/cycle versus about `3.69` seconds/cycle for eight replan passes, with median zero-stock goods `0` and median current-basket completion about `0.997`. This makes depth `4` the current first candidate for one-agent basket optimization probes.
+
+Practical recommendation for phenomenon-screening runs:
+
+- use `--experimental-session-clearing-phenomenon-exchange`
+- use `--experimental-aspirational-stock-target 2.0`
+- start with `--experimental-session-candidate-depth 4 --experimental-session-replan-passes 1`
+- keep `--experimental-session-replan-passes 8` as the conservative comparison baseline
+- reserve `--experimental-session-replan-after-trade` for semantic diagnostics, not default large runs
+
+This keeps the information boundary local while avoiding the unrealistic result where agents hold large undifferentiated inventories but fail to complete the baskets needed to raise living standard.
+
+Validation rule:
+
+- use the exact path for selected short cross-checks and final reference runs
+- use the parallel phenomenon path for long searches over parameters and seeds
+- accept path-dependent timing differences only if growth, monetization, welfare, friction, inequality, and cycle phenomena remain robust and non-tendentiously biased
+
+The next safe optimization step is native execution of an already scheduled conflict-free batch. That must accumulate shared market deltas, such as TCE by good, in per-thread buffers and apply them deterministically after the batch. Direct parallel writes to shared market arrays are not acceptable.

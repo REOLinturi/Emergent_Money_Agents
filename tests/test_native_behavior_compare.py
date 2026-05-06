@@ -90,3 +90,29 @@ def test_run_native_behavior_comparison_rejects_unknown_tolerance() -> None:
         assert 'unknown behavior tolerance metric' in str(exc)
     else:
         raise AssertionError('expected ValueError for unknown tolerance metric')
+
+
+def test_run_native_behavior_comparison_can_stop_early_with_partial_summary() -> None:
+    config = SimulationConfig(
+        population=8,
+        goods=3,
+        acquaintances=2,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        seed=2009,
+    )
+
+    summary = run_native_behavior_comparison(
+        cycles=5,
+        seeds=[2009, 2011],
+        config=config,
+        max_runtime_seconds=0.0,
+    )
+
+    assert summary['stopped_early'] is True
+    assert summary['stop_reason'] == 'max_runtime_seconds'
+    assert summary['completed_seed_count'] == 0
+    assert len(summary['per_seed']) == 1
+    assert summary['per_seed'][0]['cycles_completed'] == 1
+    assert summary['matched_observed_seed_count'] == 1

@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .analytics import analyze_history, compute_good_snapshots
+from .analytics import analyze_history, compute_good_snapshots, compute_inequality_snapshot
 from .config import SimulationConfig
 from .dto import MarketSnapshot
 from .engine import SimulationEngine
@@ -18,7 +18,7 @@ _CHECKPOINT_STEM = "checkpoint_latest"
 _CHECKPOINT_VERSION = 1
 
 
-def save_checkpoint(engine: SimulationEngine, destination_dir: str | Path) -> Path:
+def save_checkpoint(engine: SimulationEngine, destination_dir: str | Path, *, compressed: bool = True) -> Path:
     destination = Path(destination_dir)
     destination.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {}
@@ -36,7 +36,7 @@ def save_checkpoint(engine: SimulationEngine, destination_dir: str | Path) -> Pa
 
     metadata_path = destination / f"{_CHECKPOINT_STEM}.json"
     arrays_path = destination / f"{_CHECKPOINT_STEM}.npz"
-    _atomic_write_npz(arrays_path, arrays)
+    _atomic_write_npz(arrays_path, arrays, compressed=compressed)
     _atomic_write_json(metadata_path, metadata)
     return metadata_path
 
@@ -70,6 +70,7 @@ def run_long_simulation(
     sample_every: int = 10,
     resume_from: str | Path | None = None,
     top_goods: int = 8,
+    compress_checkpoint: bool = True,
 ) -> dict[str, Any]:
     if cycles <= 0:
         raise ValueError("cycles must be positive")
@@ -96,14 +97,14 @@ def run_long_simulation(
         for offset in range(1, cycles + 1):
             metrics = engine.step()
             if offset % sample_every == 0 or offset == cycles:
-                metrics_file.write(json.dumps(asdict(metrics), sort_keys=True) + "\n")
+                metrics_file.write(json.dumps(_metrics_payload(metrics, engine), sort_keys=True) + "\n")
                 metrics_file.flush()
             if offset % checkpoint_every == 0 or offset == cycles:
-                save_checkpoint(engine, artifact_dir)
+                save_checkpoint(engine, artifact_dir, compressed=compress_checkpoint)
 
     runtime_seconds = time.perf_counter() - started_at
     latest_metrics = engine.history[-1] if engine.history else engine.snapshot_metrics()
-    latest_market = MarketSnapshot.from_metrics(latest_metrics)
+    latest_market = MarketSnapshot.from_metrics(MetricsSnapshot(**_metrics_payload(latest_metrics, engine)))
     goods = compute_good_snapshots(state=engine.state, backend=engine.backend, limit=top_goods)
     phenomena = analyze_history(engine.history, goods)
 
@@ -127,6 +128,17 @@ def run_long_simulation(
     }
     _atomic_write_json(summary_path, summary)
     return summary
+
+
+def _metrics_payload(metrics: MetricsSnapshot, engine: SimulationEngine) -> dict[str, Any]:
+    payload = asdict(metrics)
+    inequality = compute_inequality_snapshot(
+        state=engine.state,
+        backend=engine.backend,
+        config=engine.config,
+    )
+    payload.update(asdict(inequality))
+    return payload
 
 
 def _flatten_dataclass(
@@ -159,6 +171,10 @@ def _restore_dataclass(prefix: str, target: Any, backend, arrays: dict[str, np.n
         if field_prefix in scalars:
             setattr(target, field.name, scalars[field_prefix])
             continue
+        if field_prefix not in arrays:
+            # Older checkpoints do not contain fields added later for
+            # observational metrics. Keep the freshly initialized default.
+            continue
         restored = arrays[field_prefix]
         setattr(target, field.name, backend.asarray(restored, dtype=restored.dtype))
 
@@ -182,11 +198,25 @@ def _resolve_checkpoint_files(source: str | Path) -> tuple[Path, Path]:
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temp_path.replace(path)
+    _replace_with_retry(temp_path, path)
 
 
-def _atomic_write_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
+def _atomic_write_npz(path: Path, arrays: dict[str, np.ndarray], *, compressed: bool) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     with temp_path.open("wb") as handle:
-        np.savez_compressed(handle, **arrays)
-    temp_path.replace(path)
+        if compressed:
+            np.savez_compressed(handle, **arrays)
+        else:
+            np.savez(handle, **arrays)
+    _replace_with_retry(temp_path, path)
+
+
+def _replace_with_retry(source: Path, target: Path, *, attempts: int = 20, delay_seconds: float = 0.05) -> None:
+    for attempt in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay_seconds * (attempt + 1))

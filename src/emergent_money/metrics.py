@@ -35,6 +35,48 @@ class MetricsSnapshot:
     stored_delta_total: float
     loser_share: float
     price_average: float
+    value_weighted_monetary_concentration: float = 0.0
+    value_weighted_rare_goods_monetary_share: float = 0.0
+    exchange_media_concentration: float = 0.0
+    rare_goods_exchange_media_share: float = 0.0
+    stock_value_gini: float = 0.0
+    stock_value_top_decile_share: float = 0.0
+    stock_value_mean: float = 0.0
+    stock_value_median: float = 0.0
+    living_standard_gini: float = 0.0
+    living_standard_top_decile_share: float = 0.0
+    living_standard_mean: float = 0.0
+    living_standard_median: float = 0.0
+    living_standard_p10: float = 0.0
+    living_standard_p25: float = 0.0
+    living_standard_p75: float = 0.0
+    living_standard_p90: float = 0.0
+    living_standard_p99: float = 0.0
+    aspiration_balance_mean: float = 0.0
+    aspiration_balance_median: float = 0.0
+    aspiration_balance_p10: float = 0.0
+    aspiration_balance_p90: float = 0.0
+    aspiration_shortfall_share: float = 0.0
+    aspiration_shortfall_mean: float = 0.0
+    aspiration_shortfall_p90: float = 0.0
+    smith_cost_gini: float = 0.0
+    smith_cost_top_decile_share: float = 0.0
+    smith_cost_mean: float = 0.0
+    smith_cost_median: float = 0.0
+    smith_cost_p10: float = 0.0
+    smith_cost_p25: float = 0.0
+    smith_cost_p75: float = 0.0
+    smith_cost_p90: float = 0.0
+    smith_cost_p99: float = 0.0
+    production_time_value: float = 0.0
+    direct_production_time: float = 0.0
+    production_time_share_of_budget: float = 0.0
+    tce_share_of_output_value: float = 0.0
+    spoilage_share_of_output_value: float = 0.0
+    friction_share_of_output_value: float = 0.0
+    tce_share_of_time_budget: float = 0.0
+    spoilage_share_of_time_budget: float = 0.0
+    friction_share_of_time_budget: float = 0.0
 
 
 def compute_metrics(
@@ -54,6 +96,10 @@ def compute_metrics(
     network_density: float,
     monetary_concentration: float,
     rare_goods_monetary_share: float,
+    value_weighted_monetary_concentration: float = 0.0,
+    value_weighted_rare_goods_monetary_share: float = 0.0,
+    exchange_media_concentration: float = 0.0,
+    rare_goods_exchange_media_share: float = 0.0,
 ) -> MetricsSnapshot:
     xp = backend.xp
     unmet_need_total = float(backend.to_scalar(xp.sum(state.need)))
@@ -99,4 +145,8 @@ def compute_metrics(
         stored_delta_total=stored_delta_total,
         loser_share=loser_share,
         price_average=float(state.market.price_average),
+        value_weighted_monetary_concentration=value_weighted_monetary_concentration,
+        value_weighted_rare_goods_monetary_share=value_weighted_rare_goods_monetary_share,
+        exchange_media_concentration=exchange_media_concentration,
+        rare_goods_exchange_media_share=rare_goods_exchange_media_share,
     )

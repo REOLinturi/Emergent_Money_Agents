@@ -25,6 +25,8 @@ For the exact path, the following may not change without an explicit behavioral 
 - transaction-cost waste rule
 - stock-limit, learning, price, and transparency updates
 
+The phenomenon path is separate from this exact path. The deprecated wave-based phenomenon path is retained only for comparison; new non-exact exploratory runs should use the session-clearing phenomenon path, where local-session timing is treated as a realism assumption rather than an exact optimization.
+
 Optimization may change how the same work is executed, but not what work is performed.
 
 ### Current Empirical Situation
@@ -346,12 +348,21 @@ Next step:
 
 ### Sequential Exact-Core Plan
 
+Execution classes are now kept explicitly separate:
+
+- `exact-baseline`: parity-preserving reference-compatible execution. This path may use only accepted native slices and must keep `experimental_native_exchange_stage=False`.
+- `exact-tolerant acceleration`: still uses the legacy decision model and sequential proposer order, but may accept boundary-case numerical differences and path-dependent individual-agent divergence when the differences are not a detectable systematic macro bias and the observed economic phenomena survive multi-seed checks.
+- `realism path`: intentionally changes the decision model, for example basket-level planning by the active agent. This path must stay opt-in and must never be presented as a Legacy-C exact result.
+
+The near-term optimization target is `exact-baseline` first. If a Rust slice cannot be made strictly exact after focused attempts, it may be proposed for `exact-tolerant acceleration`, but only after the comparison reports classify the mismatch as a plausible boundary/path-dependence effect and after report-scale macro phenomena remain robust.
+
 Stage A: Rust owns the full trade path
 
 - port `_satisfy_needs_by_exchange` and `_make_surplus_deals` together with the immediately adjacent trade bookkeeping
 - include post-trade value, purchase, sales, inventory-trade, and TCE accounting in the same contiguous Rust block
 - acceptance gate: no per-cycle mismatches on `32/6/6` for `100` cycles across seeds `2009/2011/2013`
 - second gate: no macro drift outside floating-point noise on `64/6/6` for `50` cycles across the same seeds
+- tolerant fallback gate: if strict parity still fails, mismatches must be plausible non-tendentious boundary/path-dependence effects. Acceptance is then phenomenon-level: growth, monetization, welfare plateau or cycle, friction/spoilage behavior, role concentration, and inequality dynamics must remain qualitatively similar over multi-seed report-scale probes even if individual agents and exact cycle timing diverge.
 
 Stage B: Rust owns the post-period state transition
 
@@ -399,6 +410,112 @@ In theory, a speculative parallel trade search with rollback is possible:
 
 But this is still not semantically free. The loser trade was chosen under a stale state that no longer exists after the winner commits, so rollback alone is not enough; the loser must be replanned. That makes the method closer to an asynchronous matching algorithm than to true simultaneous execution, and it should be treated as an experimental post-port optimization, not as part of the exact reference path.
 
+### GPU and Hardware Strategy
+
+Current local hardware check, `2026-04-27`:
+
+- local GPU: `NVIDIA GeForce RTX 4090 Laptop GPU`
+- reported VRAM: `16376 MiB`
+- current Python CUDA stack: CuPy is not installed, so `--backend cuda` is not currently available from the CLI on this machine
+
+Memory is not the only issue. For `10000 / 100 / 150`, persistent model state is still modest if stored compactly: roughly below `1 GiB` for the main arrays, with the transparency tensor alone about `0.56 GiB`. The scaling problem comes from candidate evaluation. A fully materialized score tensor over `population * acquaintances * goods * goods` would be about `15 billion` candidate cells at `10000 / 100 / 150`; one `float32` score array alone would be about `60 GiB`, before validity masks and intermediate arrays. Therefore any viable GPU path must stream, tile, and reduce candidates instead of materializing the full search space.
+
+Implications:
+
+- the laptop GPU can be useful for small and medium GPU-kernel development, correctness checks, and tiled experiments
+- the laptop's `16 GiB` VRAM is not the right target for dense or near-dense large exploratory runs
+- a tower GPU with about `96 GiB` VRAM should be preferred for the maximally parallel phenomenon-preserving path, especially if candidate matrices, larger tiles, or larger populations are used
+- even on `96 GiB`, avoid full `population * acquaintances * goods * goods` materialization; use tiled or streaming reductions that still examine the full economically available opportunity set
+- moving large runs to the tower is sensible once the CUDA stack is installed and the GPU path is benchmarked there
+
+Next GPU-oriented optimization targets:
+
+- restore a working CUDA backend environment, probably through a CuPy build matching the installed NVIDIA driver/CUDA stack
+- profile the existing CUDA proposal kernel, because the current scaling bottleneck is proposal/candidate volume, not checkpointing
+- replace one-thread-per-agent inner candidate loops with a parallel candidate reduction where threads cover friend/good/offer combinations and reduce to the best proposal per agent
+- keep trade commit sequential or conflict-resolved until phenomenon-level equivalence has been demonstrated
+- use `3000 / 30 / 100` and `10000 / 30 / 150` as validation sizes before retrying `10000 / 100 / 150 / 2000`
+
+### Opportunity-Set Policy
+
+The current research direction rejects speedups that come from arbitrary candidate pruning.
+
+Principle:
+
+- do not reduce `demand_candidates`, `supply_candidates`, acquaintances, or good-pair scans merely to make the code faster
+- any narrower opportunity set must have an explicit real-world interpretation, such as bounded attention, search fatigue, posted-price filters, specialist inventory constraints, or another modeled agent heuristic
+- when no such heuristic is being studied, the phenomenon path should let the active agent evaluate the full set of relevant known counterparties and goods
+- use parallel scoring, tiled reductions, cache reuse, and compiled loops to make that full search affordable
+- keep exact/legacy controls available for comparison, but do not treat the old `4`-candidate buffers as the preferred realism target
+
+Engineering consequence:
+
+- exact-reference optimization may still preserve the historical implementation's opportunity set for validation
+- phenomenon-model optimization should prefer `demand_candidates=goods` and `supply_candidates=goods` where the research question assumes a trader can inspect all known goods
+- GPU and CPU-thread work should focus on full-search reductions rather than top-k approximation
+- if a pruning heuristic is introduced later, it must be exposed as an explicit model variant, documented, and compared against the full-search baseline
+
+### Basket Decision Semantics
+
+The basket path is a realism-model variant, not an exact Legacy-C reference. It may let the active
+agent inspect all locally visible needs, friends, and goods before choosing the best next exchange,
+but it must still preserve the primitive-market assumption that one agent commits one decision at a
+time.
+
+Accepted rule:
+
+- full-basket scoring is allowed, and should eventually be parallelized as a read-only reduction
+- after one accepted trade, rejected candidate, or exhausted-offer update, the agent must replan from the new inventory and partner state
+- executing multiple trades from one stale candidate slate is not acceptable as a default phenomenon path, because it creates a simultaneous multi-trade institution that the Legacy report does not assume
+- if a later model intentionally studies posted prices, clearing houses, auctions, or other richer market institutions, multi-trade execution can be reintroduced as a separate documented model variant
+
+Diagnosis recorded on `2026-04-28`:
+
+- long `3000/30/100/2000` basket runs showed a pathology not seen in no-basket exact-reference style runs: median living standard stayed near `1.05`, aspiration shortfall was above half the population, accepted trade volume was about `2.5x` the no-basket reference, and private price tails reached about `1e20`
+- the pathology was concentrated in the old basket implementation that planned a whole basket and then executed several trades before replanning
+- comparable no-basket runs still showed high friction, inequality, rare-money emergence, and boom-to-decline behavior, but not the same extreme price explosion or persistent majority-at-baseline outcome
+- the code has therefore been changed so both the Python fallback and Rust basket stage replan after each processed candidate
+- a first `500/30/100/500` probe with the corrected replan-one basket semantics kept prices bounded and produced plausible welfare dispersion, but it was substantially slower than the old stale-slate basket path
+
+Engineering consequence:
+
+- the next basket-speed target is parallel or compiled full-opportunity scoring for the single next decision
+- do not regain speed by committing many stale basket candidates in one pass
+- exact-path speed work remains separate and must continue to preserve the historical sequential decision rule
+
+### Report-Faithful Heuristic Corrections
+
+`Exact` now means faithful to the report-level model assumptions, not blind preservation of every
+Legacy-C implementation accident. Legacy-C remains an important reference, but when the C code
+contains a clear heuristic bug that contradicts the report and real barter logic, the maintained
+exact path should correct it and document the divergence.
+
+Accepted correction on `2026-04-29`:
+
+- retailer purchase-price thresholds must not end a period above the same retailer's sales-price threshold
+- the correction is applied in both Python and Rust-native post-period logic
+- the practical merchant interpretation is simple: a trader should not plan to buy inventory at a price above the price at which it is willing to resell it
+- this is consistent with the report's wording that normal purchase prices should be checked against minimum sales prices, while allowing private money-good prices to remain high when supply-chain position justifies it
+- a one-cycle probe from the pathological `3000/30/100/2000` basket checkpoint reduced retailer `purchase_price > sales_price` violations from `1652` to `0`
+- the existing huge private-price tail does not vanish in one cycle because some sales-price thresholds had already ratcheted upward; new validation runs must check whether the corrected invariant prevents the tail from forming in the first place
+
+Accepted correction on `2026-05-03`:
+
+- agents must not satisfy aspirational need by forcing own production into negative available time
+- if available time is insufficient, own production is capped proportionally, residual need remains visible in `state.need`, and the period is marked as a failure
+- producer price heuristics follow the report-level logic: normal stock with weak sales anchors the sales threshold to production cost, and large unsold stock can discount to cost and then below cost if no demand appears
+- the correction is applied in both the Python exact path and the Rust-native stage-math path
+- dedicated unit tests now cover time-limited need production, remaining unmet need, producer cost anchoring, and producer discounting after persistent no-sales inventory
+
+Accepted correction on `2026-05-03`, after the `3000/30/100/3000` rules-fix run:
+
+- price thresholds must not decay numerically to zero for actively traded goods
+- the maintained path now uses a use-value price floor rather than the old global hard floor
+- the floor is anchored to the agent's focused production cost for that good and discounted by inventory overhang: if stock exceeds the visible consumption/sales horizon, adjusted for spoilage, the floor can fall below production cost
+- this preserves the real-world interpretation that every good has some use value, while still allowing fire-sale pricing when visible inventories are too large to consume before spoilage
+- retailer resale margin is preserved at the floor: purchase thresholds may not end at or above sales thresholds
+- the correction is applied in both Python and Rust-native post-period price logic, with tests covering useful inventory, overhang discounting, and native parity
+
 ### Current Direction
 
 - finish the Rust sequential exact core first
@@ -406,13 +523,30 @@ But this is still not semantically free. The loser trade was chosen under a stal
 - defer serious CPU-thread or GPU parallelism until the full Rust core is stable
 - evaluate parallelism only through explicit multi-seed comparison against the Rust sequential reference
 - use the new `native_behavior_compare` harness as the behavioral gate for larger Rust ports, not only the strict per-cycle parity harness
-- current reference artifact: `runs/native_behavior_compare_exchange_stage_32_6_6_40.json`, which shows the exchange-stage path is still faster-but-too-drifting to accept
+- current strict/tolerant artifacts:
+  - `runs/native_cycle_compare_exchange_stage_32_6_6_40_tolerant_gate.json`
+  - `runs/native_cycle_compare_exchange_stage_32_6_6_100_tolerant_gate.json`
+  - `runs/native_cycle_compare_exchange_stage_64_6_6_50_tolerant_gate.json`
+  - `runs/native_behavior_compare_report_scale_exchange_stage_20cycles_s2_tolerant_gate.json`
 - a new exchange-stage trace harness now exists in `native_exchange_stage_trace_compare.py`; it compares per-agent stage events between the Python exact reference and an experimental native path and reports the first mismatching stage event
 - current trace artifacts: `runs/native_exchange_trace_compare_32_6_6_40.json` and the looser-tolerance `runs/native_exchange_trace_compare_32_6_6_40_loose.json`
-- current Stage A diagnosis: before the first macro drift, the native exchange-stage path first shows only ulp-scale bookkeeping differences; when tolerances are widened, the first structural divergence appears around cycles `26-32` as an exchange-stage event-count / stage-order mismatch rather than an immediately different partner or goods choice
-- this points the next Rust debugging step toward leisure/surplus stage-boundary timing and the surrounding transition logic, not toward the inner barter search itself
-- operational correction: the rejected `experimental_native_exchange_stage` path no longer activates in normal exact runs; it now requires an explicit engine-level opt-in used only by the comparison harnesses
-- consequence: normal exact runs stay on the parity-preserving path (native search/planning plus the accepted safe native stage-math slice), while the drift-prone exchange-stage commit path remains available only for diagnostics and future debugging
+- current Stage A diagnosis: the earlier long-horizon drift has been narrowed. The whole-cycle full-state harness now reports strict mismatches only in `engine._inventory_trade_volume`, at about `1e-14` to `1e-12`, with zero snapshot deltas and zero material mismatches through the current `32/6/6/100` and `64/6/6/50` gates.
+- report-scale behavior is stable only on the short gates so far: `3000/30/100`, `20` cycles, seeds `2009/2011`, zero macro drift, about `23x` speedup; and `runs/native_behavior_compare_report_scale_exchange_stage_40cycles_s2_tolerant_gate.json`, `40` cycles, seeds `2009/2011`, zero macro drift, about `15.7x` speedup.
+- The longer gated attempt `runs/native_behavior_compare_report_scale_exchange_stage_100cycles_s2_partial_gate.json` rejects strict behavioral parity but no longer automatically rejects phenomenon-level use. It stopped by the explicit runtime guard at cycle `88` of seed `2009`, but the first behavioral mismatch was already at cycle `64`: accepted trade count differed by `1`, with nonzero production, stock, and trade-volume deltas. By cycle `88`, the deltas had amplified materially, which is expected in a path-dependent nonlinear system. The open question is now whether the macro phenomena remain robust and non-tendentiously biased.
+- The first concrete Stage A divergence is now localized. `runs/native_exchange_trace_report_scale_seed2009_65cycles_stageA_diag.json` shows the first event mismatch at cycle `64`, surplus stage, agent `461`, event index `923`: the Python reference records `224` proposed / `36` accepted proposals for that stage, while the native exchange-stage records `223` proposed / `35` accepted. The last stored proposal is still the same in both paths, so the root is an earlier marginal proposal inside the same surplus loop, not a different final candidate.
+- `runs/native_cycle_compare_report_scale_exchange_stage_65_seed2009_material_diag_v3.json` confirms that, after tolerating only `engine._inventory_trade_volume` accumulator roundoff, the first material full-state mismatch is also cycle `64`: accepted trade count differs by `1`, accepted volume by about `2.20`, production by about `22.12`, and stock total by `256`. There are `61` tolerated inventory-volume accumulator mismatches before that, but no material snapshot drift.
+- A focused cycle-64 state probe shows the first trade-allocation difference around goods `11/19` in the surplus network. The reference has an extra `461 <-> 2574` trade for that goods pair, while the native path later has an extra `875 <-> 2574` trade for the same goods pair; the reference also has an extra `2126 <-> 1798` surplus trade for goods `13/11`. This points to accumulated intra-stage floating-point execution differences around a marginal surplus-loop threshold, rather than a gross ordering or partner-selection bug.
+- The first checkpointed fast long-run artifact is `runs/exact_tolerant_exchange_3000_30_500_seed2009`: `3000/30/100`, `500` cycles, seed `2009`, about `6.0 s/cycle`. It shows continued production/trade/stock growth at cycle `500`, rare-money share about `87%`, utility peaking earlier around cycle `355`, and friction rising to about `27%` of the time budget. Because the 100-cycle gate found material drift, this run must be treated as exploratory fast-path evidence only, not exact-tolerant validation.
+- The first phenomenon-level multi-seed gate now exists for the fast exchange-stage path: `runs/exact_tolerant_exchange_3000_30_500_seed2009`, `runs/phenom_tolerant_exchange_3000_30_500_seed2011`, and `runs/phenom_tolerant_exchange_3000_30_500_seed2013`, summarized in `runs/phenom_tolerant_exchange_3000_30_500_summary.csv`. All three 500-cycle report-scale runs show the same phenomenon flags: production growth, rare-money emergence, utility peak before the end, rising friction, and high living-standard inequality. Individual levels and peak timings differ substantially, which is expected under path dependence.
+- In the three-seed 500-cycle gate, utility peaks at cycles `355/395/350`, while living-standard mean peaks much earlier at cycles `125/110/115`. By cycle `500`, production and trade remain high or rising, rare-money share is about `0.83-0.87`, and living-standard mean has fallen to about `29-38%` of its peak. This is qualitatively consistent with the target phenomenon: GDP-like activity can keep growing while welfare no longer follows and transaction/friction burdens rise.
+- The seed `2009` fast-path run has now been extended to `1000` cycles. The artifact summary is `runs/exact_tolerant_exchange_3000_30_500_seed2009/artifact_summary_1000.txt`. Production is still at its maximum at cycle `1000` (`1.77e10`), trade volume peaked around cycle `910`, rare-money share remains high at about `93%`, and stock remains at its maximum. Utility peaked much earlier at cycle `355` and is now about `39%` of that peak. Friction is high: about `85%` of the time budget, with TCE about `82%`. This strengthens the qualitative evidence that the fast path reproduces the important decoupling between output-like aggregates and welfare-like utility, but it has not yet demonstrated a full downturn/recovery cycle.
+- The same seed `2009` run has now reached `1500` cycles. The artifact summary is `runs/exact_tolerant_exchange_3000_30_500_seed2009/artifact_summary_1500.txt`. Production peaked around cycle `1290` and trade volume around cycle `1265`; at cycle `1500` both are below those peaks, while utility has recovered modestly from the cycle-1000 value but remains only about `49%` of its cycle-355 peak. Rare-money share remains high at about `92%`, stock is below its cycle-1145 peak, and friction remains very high at about `99%` of the nominal time budget. This is now a plausible late-boom/turning-point pattern, but still not a complete second cycle.
+- The seed `2009` fast-path run has now reached the planned `2000`-cycle screen. The artifact summary is `runs/exact_tolerant_exchange_3000_30_500_seed2009/artifact_summary_2000.txt`. Production peaked at cycle `1290` and ends at about `76%` of that peak; accepted trade volume peaked at cycle `1580` and ends at about `59%` of that peak; utility peaked at cycle `355` and ends at about `42%` of that peak. Rare-money share remains high at about `91%`. Stock peaked at cycle `1145` and ends at about `63%` of that peak. Friction and TCE remain high, with friction ending at about `96%` and TCE at about `93%` of the nominal time budget. This captures a strong boom/overhead/decline pattern, but not yet a clean recovery into a second boom.
+- A smaller exact-baseline cross-check is now in progress at `1000/30/100`, seed `2009`, with `experimental_native_stage_math=True` and `experimental_native_exchange_stage=False`. The first completed artifact is `runs/exact_baseline_calibration_1000_30_100_20_seed2009_v1/artifact_summary_1000_dedup.txt`. It confirms the same key early phenomena without the native exchange stage: utility peaks at cycle `355`, rare-money share reaches about `96%` and ends at about `94%`, friction/TCE rise sharply, and living-standard inequality becomes high. At cycle `1000`, production and trade are still near their peaks, so this exact-baseline run must be extended before it can confirm the full boom-to-decline transition.
+- The exact-baseline cross-check has now also reached `2000` cycles: `runs/exact_baseline_calibration_1000_30_100_20_seed2009_v1/artifact_summary_2000_dedup.txt`. It confirms the boom-to-decline transition without the native exchange stage. Production peaks at cycle `1465` and ends at about `72%` of peak; accepted trade volume peaks at cycle `1455` and ends at about `36%` of peak; utility peaks much earlier at cycle `355` and ends at about `47%` of peak. Rare-money share ends at about `90%`, friction at about `90%`, TCE at about `87%`, and stock ends at about `41%` of peak. A compact comparison with the fast-path `3000/30/100/2000` run is in `runs/phenomenon_gate_fast_vs_exact_summary.csv`.
+- The artifact analyzer now deduplicates metric samples by cycle and keeps the latest row. This matters for interrupted and resumed runs because a crash or timeout can leave sampled metrics after the latest checkpoint, and a resumed run can replay those cycles.
+- The accepted interpretation is now explicitly phenomenon-level for this path. Because the model is nonlinear and path-dependent, small branch or rounding differences may eventually shift individual trajectories and cycle timing. That is acceptable only if multi-seed runs continue to show the same macroeconomic phenomena without a detectable one-sided bias. Event-exact claims remain reserved for the exact reference baseline.
+- consequence: normal exact final-validation runs must still use the parity-preserving baseline unless the user explicitly selects `experimental_native_exchange_stage=True`. The exchange-stage path preserves the legacy decision model and sequential proposer order, so it is not a `realism path`. It is now treated as a phenomenon-level exact-tolerant candidate pending multi-seed robustness checks, not as an event-exact candidate.
 
 ### Operational Baselines
 
@@ -432,13 +566,55 @@ Fast exploratory baseline:
 - use `experimental_native_stage_math=True`
 - use `experimental_native_exchange_stage=True`
 - this is not the exact reference path
-- it is acceptable only for exploratory large-run screening when small macro drift is tolerated and any important finding is later rechecked against the exact baseline
+- until promoted by the gates above, classify it as `exact-tolerant acceleration` only for exploratory screening, not as final evidence
+- if a run also enables `experimental_agent_basket_planning`, classify it as `realism path`, because the agent decision rule changes
 - current reference artifacts:
   - `runs/native_behavior_compare_report_scale_exchange_stage_10cycles_s3_v1.json`
   - `runs/native_behavior_compare_report_scale_exchange_stage_20cycles_seed2009_v1.json`
   - `runs/native_behavior_compare_report_scale_exchange_stage_40cycles_seed2009_v1.json`
   - `runs/estimate_exact_stage_math_exchange_stage_10000_100_150_3cycles_v1.json`
+  - `runs/native_cycle_compare_exchange_stage_32_6_6_100_tolerant_gate.json`
+  - `runs/native_cycle_compare_exchange_stage_64_6_6_50_tolerant_gate.json`
+  - `runs/native_behavior_compare_report_scale_exchange_stage_20cycles_s2_tolerant_gate.json`
+  - `runs/native_behavior_compare_report_scale_exchange_stage_40cycles_s2_tolerant_gate.json`
+  - rejected longer gate: `runs/native_behavior_compare_report_scale_exchange_stage_100cycles_s2_partial_gate.json`
+  - divergence trace: `runs/native_exchange_trace_report_scale_seed2009_65cycles_stageA_diag.json`
+  - divergence full-state check: `runs/native_cycle_compare_report_scale_exchange_stage_65_seed2009_material_diag_v3.json`
+  - `runs/exact_tolerant_exchange_3000_30_500_seed2009`
+  - `runs/exact_tolerant_exchange_3000_30_500_seed2009/artifact_summary_1000.txt`
+  - `runs/exact_tolerant_exchange_3000_30_500_seed2009/artifact_summary_1500.txt`
+  - `runs/exact_tolerant_exchange_3000_30_500_seed2009/artifact_summary_2000.txt`
+  - `runs/phenom_tolerant_exchange_3000_30_500_seed2011`
+  - `runs/phenom_tolerant_exchange_3000_30_500_seed2013`
+  - `runs/phenom_tolerant_exchange_3000_30_500_summary.csv`
+  - exact-baseline cross-check: `runs/exact_baseline_calibration_1000_30_100_20_seed2009_v1/artifact_summary_1000_dedup.txt`
+  - exact-baseline cross-check: `runs/exact_baseline_calibration_1000_30_100_20_seed2009_v1/artifact_summary_1500_dedup.txt`
+  - exact-baseline cross-check: `runs/exact_baseline_calibration_1000_30_100_20_seed2009_v1/artifact_summary_2000_dedup.txt`
+  - compact gate comparison: `runs/phenomenon_gate_fast_vs_exact_summary.csv`
 - current large-scale anchor: about `3.95 s / cycle` on `10000 / 100 / 150`, projecting to roughly `2.2 h` for `2000` cycles on this machine
+- current promotion status: rejected for event-exact long-horizon use, but accepted as a phenomenon-level screening path for exploratory runs. It passes the first `3000/30/100/500` multi-seed fast-path gate, the `3000/30/100/2000` single-seed fast-path gate, and a `1000/30/100/2000` exact-baseline cross-check for rare-money emergence, output/welfare decoupling, rising friction/TCE, high inequality, and a boom-to-decline transition. It should still not be used as final exact evidence, and it still needs multi-seed exact-baseline confirmation before being promoted beyond screening.
+- overnight large-screen attempt, `2026-04-27`: `runs/nightly_large_fast_20260427/large_fast_10000_100_150_2000_seed2009` reached only cycle `60` before the foreground tool timeout. This invalidates the naive early-cycle extrapolation above for long 100-good runs. Cycle cost grew from about `139 s/cycle` around cycles `15-20` to about `843 s/cycle` around cycles `55-60`. Proposed trade count reached about `17.1M` per sampled cycle by cycle `60`, while accepted count was still about `1.0M`. The run is therefore useful as a scaling diagnostic, not as a macro-phenomenon run.
+- follow-up calibration, `runs/calibrate_fast_10000_30_150_25_seed2009`, shows that keeping population `10000` and acquaintances `150` but reducing goods to `30` is much more feasible, though still not comfortably overnight for `2000` cycles. It reached cycle `100`; the first `25` cycles averaged about `5.2 s/cycle`, while cycles `25-100` averaged about `47 s/cycle`. At cycle `100`, utility and production were still rising, rare-money share was about `21%`, and friction was about `16%`.
+- checkpoint compression is now optional. Use `--uncompressed-checkpoint` for long local screening runs when disk space is available. On the `10000/30/150` cycle-100 checkpoint, compressed checkpoint writing took about `17.2 s` and produced about `174 MiB`; uncompressed writing took about `0.43 s` and produced about `560 MiB`. This is a safe operational speedup because it changes only artifact serialization, not model state or decisions.
+- `RAYON_NUM_THREADS` does not materially improve the current installed native exchange-stage module. A one-cycle cycle-100 benchmark at `10000/30/150` took about `61.2 s` with `RAYON_NUM_THREADS=1` and about `63.6 s` with `RAYON_NUM_THREADS=8`. The current compiled path therefore does not expose enough of the expensive inner search to effective CPU-thread parallelism.
+- the agent basket planning path remains a phenomenon-model candidate, not a speed win yet. On `3000/30/100/40`, it roughly halved the last sampled proposal count (`463k -> 239k`) while preserving accepted count/volume, but runtime was similar. On `10000/30/150/25`, it reduced later proposal count (`866k -> 575k` at cycle `25`) but was slower overall (`164 s` vs `129 s`). It may become useful after the native basket path is optimized or moved to GPU-style reductions.
+- local Rust build tooling is now available. Rust `1.95.0` and Cargo are installed under the user profile, MSVC Build Tools 2019 are available through `VC\Auxiliary\Build\vcvars64.bat`, and the project `.venv` has a working maturin. The reliable build command is:
+
+```powershell
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+cmd.exe /c '"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && .venv\Scripts\python.exe -m maturin build --release -m native\legacy_search\Cargo.toml'
+```
+
+- first post-toolchain Rust optimization: `run_exchange_stage` now caches the active agent's reciprocal friend slots once per stage and updates the cache only when a missing reciprocal link is created. This preserves the decision model and removes repeated `acquaintances * acquaintances` scans inside the need/attempt loops. On the `10000/30/150` cycle-100 checkpoint, the old system module took about `57.2 s` for one cycle with uncompressed checkpointing; the rebuilt module in `.venv` took about `40.0 s`, roughly `1.43x` faster. Regression tests covering native exchange/cycle behavior pass in `.venv`.
+- second post-toolchain Rust optimization, `2026-04-27`: the exact exchange stage now uses a dense per-good forbidden-offer bit vector instead of a per-need `HashSet`, reuses the candidate-offer buffer inside the attempt loop, and the basket/phenomenon exchange stage reuses cached reciprocal friend slots across basket replans. These are data-structure and cache changes only; trade search order and commit order are unchanged. On the same `10000/30/150` cycle-100 checkpoint, one uncompressed exact/native cycle measured `36.2 s`, about another `1.10x` over the reciprocal-slot cache build and about `1.58x` over the old system module. The `3000/30/100/40` basket benchmark with seed `2027` improved from about `93.6 s` to `86.8 s` while preserving the same macro totals for the benchmark run. Native regression gate after rebuild: `32 passed`.
+- third post-toolchain Rust optimization, `2026-04-27`: the native search uses the Rayon parallel scan only for larger candidate grids (`>= 65,536` cells). The old `4,096` threshold caused report-scale and `100`-good searches to enter Rayon for many small repeated searches, where scheduling/reduction overhead dominated useful work. The same exact/native `10000/30/150` cycle-100 checkpoint measured `27.8 s` after this change, down from `36.2 s`, with identical benchmark metrics.
+- fourth post-toolchain Rust optimization, `2026-04-27`: basket/phenomenon planning now forms per-need candidates sequentially for normal `30-100` good runs instead of launching a Rayon job for every basket replan. Candidate ordering is still determined by explicit score/order sorting before commit, so this is a scheduling change rather than a behavioral change. The `3000/30/100/40` basket benchmark with seed `2027` measured `29.0 s`, down from `80.4 s` after the search-threshold change and from `93.6 s` before this optimization round, with the same observed utility, production, and rare-money values in the benchmark output.
+- fifth post-toolchain Rust optimization, `2026-04-27`: the sequential native search now holds the current friend's stock, role, limit, purchase-price, and sales-price rows as local views inside the friend loop, avoiding repeated two-dimensional `ndarray` indexing in the offer loop. This is exact-preserving. The `10000/30/150` cycle-100 exact/native checkpoint measured `26.9 s`, a small improvement from `27.8 s`; the basket benchmark was effectively neutral (`29.6 s` versus `29.0 s`, same macro output), so this should be kept only if longer repeated benchmarks confirm it remains neutral or positive.
+- sixth post-toolchain Rust optimization, `2026-04-27`: the exact exchange stage now reuses the forbidden-offer, base-offer, and candidate-offer buffers across needs inside one stage call instead of allocating fresh vectors for every need. A generation-counter variant was rejected because it was not faster; the accepted version keeps a simple reusable bool buffer and clears it per need. This is exact-preserving and mostly removes allocation churn rather than changing the hot arithmetic.
+- seventh post-toolchain Rust optimization, `2026-04-27`: the normal sequential search now has a contiguous-slice fast path for standard NumPy layouts, with fallback to the previous `ndarray` view path for non-contiguous views. The slice path preserves friend/offer scan order and first-best tie behavior. On the `10000/30/150` cycle-100 exact/native checkpoint, the benchmark improved to about `25.5 s`; the `3000/30/100/40` basket benchmark improved to about `28.0 s` with the same output metrics.
+- eighth post-toolchain Rust optimization, `2026-04-27`: the Rust-owned exact agent loop calls the exact native exchange stage directly for the accepted exact/native exchange path, bypassing the Python `_satisfy_needs_by_exchange` and `_make_surplus_deals` wrappers and adding the same trade metrics from Rust. This removed the 20,000 Python wrapper calls from a `10000`-agent cycle. The per-cycle benchmark on the same `10000/30/150` checkpoint measured about `24.0 s` when run sequentially. The basket path is intentionally left on the Python wrapper route for now because the direct basket call was not faster in the current `3000/30/100/40` benchmark.
+- benchmarking note: do not run CPU-heavy exact and basket benchmarks in parallel when comparing optimization variants. A parallel measurement of the two reference benchmarks produced misleadingly worse times because they contended for CPU and memory bandwidth. Use sequential benchmark runs for acceptance numbers.
+- consequence: do not schedule `10000/100/150/2000` as a routine overnight run until the candidate/proposal-heavy exchange phase is further optimized or bounded. For immediate exploratory macro work, prefer `3000/30/100` for full 2000-cycle multi-seed runs, or `10000/30/150` for shorter scale diagnostics. Treat 100-good runs as performance probes unless a new optimization changes the scaling curve.
 
 Decision rule:
 
@@ -448,29 +624,138 @@ Decision rule:
 
 ### Immediate Next Steps
 
-1. Run long report-scale exact validation on the accepted baseline.
+1. Validate Stage A at phenomenon level before using it as the default fast path.
+
+- objective: confirm that the native exchange-stage path reproduces the same macro phenomena despite path-dependent individual/event divergence
+- first gate: run `3000 / 30 / 100` to at least `500` cycles on multiple seeds and compare production growth, utility peak/plateau, rare-money emergence, friction rise, stock accumulation, inequality, and cycle/boom-bust signals
+- second gate: if the fast path passes, run one exact-baseline smaller or shorter cross-check for any important qualitative claim
+- debugging hook: transaction-level tracing inside Rust remains useful if macro bias appears, but it is no longer the immediate blocker if the phenomenon-level gate passes
+- status: first gate passed on three seeds through `500` cycles, seed `2009` has been extended to `2000` cycles, and a `1000/30/100/2000` exact-baseline cross-check has confirmed the same key qualitative phenomena including the boom-to-decline transition. The fast path can now be used for large exploratory screening, while exact-baseline runs remain required for final validation of any scientific claim.
+
+2. Keep the accepted exact baseline available for final validation.
 
 - objective: confirm that the now-accepted stage-math slice still reproduces the report-style dynamics over the longer horizon where growth and cycles should emerge
 - default target: `3000 / 30 / 100`, `1000-2000` cycles, checkpointed
 
-2. Run large exploratory screening on the fast baseline.
+3. Run large exploratory screening on the fast baseline only after the extended gate.
 
 - objective: make `10000 / 100 / 150 / 2000` practical enough to use as a search instrument for macro phenomena
 - record production, utility, rare-money share, cycle metrics, spoilage, and TCE waste
 - treat these runs as hypothesis generation, not final evidence
+- current status: first overnight attempt showed that `10000 / 100 / 150` is dominated by proposal volume and is not yet feasible for `2000` cycles. The next engineering step is to profile and reduce the exchange proposal workload before retrying a 100-good long run.
 
-3. Cross-check any interesting large-run finding against the exact baseline.
+4. Cross-check any interesting large-run finding against the exact baseline.
 
 - downscale to report size or another exact-feasible checkpointed size
 - verify that the qualitative finding survives without the experimental exchange-stage shortcut
 
-4. Continue Stage A exactness work only if promotion of the fast path becomes strategically necessary.
+5. Continue Stage A exactness work only if extended gates find material drift.
 
-- the remaining Stage A drift is now small enough to be useful operationally
-- but exact promotion still requires elimination of the residual exchange bookkeeping and stage-boundary drift
-- do not spend time on this before the exact long-run and large exploratory workflows have both been exercised
+- the remaining strict Stage A difference is currently inventory-volume floating-point roundoff
+- if no material drift appears, prefer documenting this as exact-tolerant rather than spending disproportionate effort on bit-for-bit accumulator parity
 
-5. Keep parallelism out of the mutable exact core until the full Rust sequential core is complete.
+6. Keep parallelism out of the mutable exact core until the full Rust sequential core is complete.
 
 - near-term speed work should still prioritize larger contiguous Rust ownership of the sequential core
 - any later CPU-thread or GPU parallelism must be evaluated only against the Rust sequential reference
+
+### Phenomenon Path Status
+
+Status: the old wave-based screening path behind `--experimental-parallel-phenomenon-exchange` is deprecated. It remains available only for comparison and rollback while the session-clearing path is validated.
+
+- exact path remains the reference and is not replaced
+- active agents evaluate locally visible exchange opportunities from a read-only wave snapshot
+- Rust/Rayon scores candidate trades across agents and goods before Python conflict scheduling
+- the scheduler commits only conflict-free trades, preserving one concrete decision per agent per wave
+- only the best next proposal per active agent is materialized for the scheduler; this is a full-search reduction, not pre-search opportunity pruning
+- the Python driver must not re-scan every good for every active agent after each surplus wave; the Rust planner is the source of truth for whether an agent can still form an execution-ready proposal. A `3000/100/100` probe showed this Python remaining-need scan consuming most of cycle time, and removing it cut the 7-cycle probe from about `85 s` to about `20 s` without changing accepted trade counts in the probe.
+- default phenomenon settings use a population-wide frontier, no frontier-partner blocking, and both consumption and surplus exchange stages
+- the path automatically uses the native stage-math helpers for preparation, production, leisure, and period-end arithmetic
+- the phenomenon path also uses the isolated Rust `surplus_production` helper when available; the exact path does not opt into this because full strict-cycle parity remains a separate gate
+- current speed boundary: the full phenomenon stage loop can now run inside Rust, including planning, deterministic conflict resolution, and execution of scheduled conflict-free trades. This removes Python wave overhead, but a `3000/100/100` probe still hit `10000` native surplus waves by cycle `15`; cycle `20-25` remains minutes rather than seconds. Further order-of-magnitude gains require reducing the number of sequential market waves, not just moving existing waves across the Python/Rust boundary.
+- selected checkpoints and short windows should still be checked with the exact path before drawing final conclusions
+
+Current preferred realism path:
+
+- `--experimental-session-clearing-phenomenon-exchange` is the new non-exact phenomenon path
+- active agents first enter the same decision stage, then each local session can clear multiple revalidated barter decisions
+- the agent's opportunity set is still only its own state, prices, history, and known acquaintances; no global dashboard or market aggregates are exposed
+- stale candidates are skipped by revalidation against current stock, need, price, transparency, and partner capacity
+- the current native implementation builds one ranked shopping list per session stage and does not rescan the full local basket after each accepted trade
+- if macro anomalies do not appear, remove the deprecated wave path instead of maintaining both variants
+
+Next safe speed target after session-clearing validation:
+
+- add conflict-free scheduling of independent local sessions
+- keep shared accumulators, especially market TCE by good, as per-session or per-thread deltas and apply them deterministically
+- do not parallelize direct shared writes to inventories, market arrays, prices, or acquaintance tables without explicit disjointness or deterministic reduction
+
+### Post-Current-Run Backend Metrics Backlog
+
+The previous current long run has finished, so this backlog can now be implemented incrementally. These changes are useful for the dashboard and research workflow, but they must remain observational: they must not mutate run state or change checkpoint resume semantics.
+
+1. Persist welfare and effort distributions as sampled history.
+
+- add checkpoint/sample-time DTO fields for living-standard mean, median, p10, p90, p99, Gini, and top-decile share
+- add the same time series for Smith-style need-basket effort cost
+- keep `/api/inequality` as the latest snapshot, but add a history-capable endpoint or extend sampled metrics so charts can show welfare cycles, not only production/trade cycles
+- validation: deterministic toy-state tests for percentile, Gini, and top-share calculations
+- status: sampled `metrics.jsonl` rows and `summary.latest_market` now carry the inequality, living-standard, Smith-cost, and friction fields; dashboard chart wiring now includes a welfare path for living-standard median/mean/p10/p90; remaining work is synthetic fixture coverage for exact percentile expectations
+
+2. Add flow accounting behind the service boundary.
+
+- split gross production into direct need consumption, surplus stock growth, inventory-mediated exchange, spoilage, and TCE/time-equivalent loss
+- record both physical totals and time/price-valued totals
+- expose ratios needed to ask how much gross output is absorbed by transaction friction rather than welfare
+- validation: conservation-style tests where produced + opening stock equals consumed + closing stock + spoilage + transferred stock within tolerance
+
+3. Add purchasing-power and inflation proxies suited to barter.
+
+- fixed need-basket cost at baseline prices
+- current average-market need-basket cost
+- rare-money-basket price index for goods currently serving monetary roles
+- agent-specific private basket cost using each agent's own purchase-price estimates
+- validation: fixed synthetic price states where each index has an obvious expected value
+- status: an observational value-weighted rare-money metric is now emitted beside the original quantity-based money-role metric. New checkpoints use transaction-time observed purchase, sale, and inventory-inflow values recorded at executed trades; older checkpoints fall back to current private-price weighting for compatibility. The money-role score is now restricted to agents currently acting as retailers for that good, so it measures merchant-style intermediation rather than every purchase that enters stock. This reporting path does not change agent decisions.
+
+4. Add income, wealth, and merchant-margin diagnostics.
+
+- period production income valued by time cost and by current market prices
+- period realized consumption value
+- net inventory accumulation and inventory turnover
+- retailer gross margin proxy: sales value minus purchase value, separated from unsold stock revaluation
+- validation: fixtures that force one producer, one consumer, and one intermediary trade chain
+
+5. Add specialization and role-stability diagnostics.
+
+- agent specialization index by production-time concentration
+- good-level producer concentration and top-producer time focus as historical series
+- role-transition rates for producer, retailer, and consumer classifications
+- "exclusion" candidates: agents with low living standard, high Smith cost, low trade success, or shrinking network activity
+- validation: small states with known role assignments and production shares
+
+6. Add network spillover and brokerage metrics.
+
+- weighted realized-interaction graph from `friend_activity` or recent exchange intensity
+- rich-core 1-hop and 2-hop living-standard comparisons
+- Burt-style weighted constraint, effective size, partner concentration, and partner-specialization diversity
+- matched-control scaffolding for degree, role count, and prior wealth controls
+- validation: hand-built graph fixtures for constraint/effective-size calculations
+
+7. Keep diagnostics backend-aware and sampling-controlled.
+
+- compute dense reductions on the active backend where practical, then copy only compact aggregates to host
+- compute heavier graph diagnostics from checkpoint artifacts or offline batches, not every dashboard poll
+- expose all additions through stable DTOs and service endpoints; dashboard code must not read raw backend arrays
+- benchmark overhead at report scale before enabling any new metric by default in long runs
+
+Acceptance rule:
+
+- these additions are observational only; they must not change cycle decisions, trade order, random streams, or checkpoint resume behavior
+- every new metric gets a fixed-input regression test and a brief dashboard explanation before it is used for research interpretation
+
+Agent information-boundary rule:
+
+- any decision-changing heuristic must use only the active agent's own state, own history, and direct-acquaintance observations from attempted or executed trades
+- global dashboard metrics, population aggregates, and ex post monetary-role scores are forbidden as decision inputs
+- the current opt-in local-liquidity stock-buffer heuristic satisfies this by reading only `friend_sold`, direct-link transparency, and the active agent's own recent turnover; see `MODEL_INFORMATION_BOUNDARY.md`

@@ -39,6 +39,8 @@ def run_native_cycle_comparison(
     total_native_seconds = 0.0
     per_seed: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
+    material_mismatches: list[dict[str, Any]] = []
+    tolerated_mismatch_count = 0
 
     for seed in seeds:
         python_engine = SimulationEngine.create(
@@ -49,10 +51,9 @@ def run_native_cycle_comparison(
             config=_target_compare_config(config, seed=seed),
             backend_name=backend_name,
         )
-        if config.experimental_native_exchange_stage:
-            setattr(native_engine, '_allow_rejected_native_exchange_stage', True)
 
         first_mismatch: dict[str, Any] | None = None
+        first_material_mismatch: dict[str, Any] | None = None
         cycles_completed = 0
         for cycle_index in range(1, cycles + 1):
             python_started = time.perf_counter()
@@ -74,8 +75,16 @@ def run_native_cycle_comparison(
             )
             cycles_completed = cycle_index
             if mismatch is not None:
-                mismatches.append(mismatch)
-                first_mismatch = mismatch
+                tolerated = _is_tolerated_boundary_mismatch(mismatch)
+                mismatch['tolerated_boundary_mismatch'] = tolerated
+                if first_mismatch is None:
+                    mismatches.append(mismatch)
+                    first_mismatch = mismatch
+                if tolerated:
+                    tolerated_mismatch_count += 1
+                    continue
+                material_mismatches.append(mismatch)
+                first_material_mismatch = mismatch
                 break
 
         per_seed.append(
@@ -84,7 +93,9 @@ def run_native_cycle_comparison(
                 'cycles_requested': cycles,
                 'cycles_completed': cycles_completed,
                 'matched_all_cycles': first_mismatch is None,
+                'matched_all_cycles_tolerant': first_material_mismatch is None,
                 'first_mismatch': first_mismatch,
+                'first_material_mismatch': first_material_mismatch,
             }
         )
 
@@ -97,9 +108,13 @@ def run_native_cycle_comparison(
         'seeds': seeds,
         'config': asdict(config),
         'mismatch_count': len(mismatches),
+        'material_mismatch_count': len(material_mismatches),
+        'tolerated_mismatch_count': tolerated_mismatch_count,
         'matched_seed_count': sum(1 for item in per_seed if item['matched_all_cycles']),
+        'matched_seed_count_tolerant': sum(1 for item in per_seed if item['matched_all_cycles_tolerant']),
         'per_seed': per_seed,
         'mismatch_examples': mismatches[:mismatch_example_limit],
+        'material_mismatch_examples': material_mismatches[:mismatch_example_limit],
         'benchmark': {
             'python_seconds': total_python_seconds,
             'native_seconds': total_native_seconds,
@@ -112,6 +127,23 @@ def run_native_cycle_comparison(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding='utf-8')
     return summary
+
+
+def _is_tolerated_boundary_mismatch(mismatch: dict[str, Any]) -> bool:
+    if any(delta != 0.0 for delta in mismatch['snapshot_deltas'].values()):
+        return False
+    examples = mismatch.get('field_mismatch_examples', [])
+    if not examples or int(mismatch.get('field_mismatch_count', 0)) != len(examples):
+        return False
+    for example in examples:
+        if example.get('field') != 'engine._inventory_trade_volume':
+            return False
+        python_value = float(example['python'])
+        native_value = float(example['native'])
+        tolerance = max(1.0e-6, 1.0e-12 * max(abs(python_value), abs(native_value), 1.0))
+        if abs(python_value - native_value) > tolerance:
+            return False
+    return True
 
 
 def _native_cycle_entrypoint_available() -> bool:

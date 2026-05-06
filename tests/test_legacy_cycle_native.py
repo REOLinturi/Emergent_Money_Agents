@@ -7,7 +7,7 @@ from emergent_money.config import SimulationConfig
 from emergent_money.engine import SimulationEngine
 from emergent_money import legacy_cycle_native
 from emergent_money.legacy_cycle import LegacyCycleRunner, run_legacy_cycle
-from emergent_money.state import ROLE_CONSUMER
+from emergent_money.state import ROLE_CONSUMER, ROLE_RETAILER
 
 
 class _FakeNativeCycleModule:
@@ -85,7 +85,7 @@ def test_native_cycle_bridge_is_disabled_for_experimental_hybrid(monkeypatch: py
     assert marker['calls'] == 1
 
 
-def test_run_legacy_cycle_keeps_rejected_native_exchange_stage_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_native_cycle_bridge_is_disabled_for_session_clearing_phenomenon(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module = _FakeNativeCycleModule()
     config = SimulationConfig(
         population=4,
@@ -94,7 +94,7 @@ def test_run_legacy_cycle_keeps_rejected_native_exchange_stage_disabled_by_defau
         active_acquaintances=1,
         demand_candidates=1,
         supply_candidates=1,
-        experimental_native_exchange_stage=True,
+        experimental_session_clearing_phenomenon_exchange=True,
     )
     engine = SimulationEngine.create(config=config, backend_name='numpy')
     marker = {'calls': 0}
@@ -111,7 +111,7 @@ def test_run_legacy_cycle_keeps_rejected_native_exchange_stage_disabled_by_defau
     assert marker['calls'] == 1
 
 
-def test_run_legacy_cycle_uses_native_bridge_for_exchange_stage_when_explicitly_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_legacy_cycle_uses_native_bridge_for_exchange_stage(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module = _FakeNativeCycleModule()
     config = SimulationConfig(
         population=4,
@@ -123,7 +123,6 @@ def test_run_legacy_cycle_uses_native_bridge_for_exchange_stage_when_explicitly_
         experimental_native_exchange_stage=True,
     )
     engine = SimulationEngine.create(config=config, backend_name='numpy')
-    setattr(engine, '_allow_rejected_native_exchange_stage', True)
     marker = {'calls': 0}
 
     def fake_run(self) -> None:
@@ -136,6 +135,326 @@ def test_run_legacy_cycle_uses_native_bridge_for_exchange_stage_when_explicitly_
 
     assert fake_module.calls == 1
     assert marker['calls'] == 0
+
+
+def test_run_legacy_cycle_keeps_native_bridge_disabled_without_native_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = _FakeNativeCycleModule()
+    config = SimulationConfig(
+        population=4,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name='numpy')
+    marker = {'calls': 0}
+
+    def fake_run(self) -> None:
+        marker['calls'] += 1
+
+    monkeypatch.setattr(legacy_cycle_native, '_load_native_search_module', lambda: fake_module)
+    monkeypatch.setattr(LegacyCycleRunner, 'run', fake_run)
+
+    run_legacy_cycle(engine)
+
+    assert fake_module.calls == 0
+    assert marker['calls'] == 1
+
+
+def test_agent_basket_planning_uses_whole_native_cycle_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = _FakeNativeCycleModule()
+    config = SimulationConfig(
+        population=4,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_native_stage_math=True,
+        experimental_agent_basket_planning=True,
+    )
+    engine = SimulationEngine.create(config=config, backend_name='numpy')
+    marker = {'calls': 0}
+
+    def fake_run(self) -> None:
+        marker['calls'] += 1
+
+    monkeypatch.setattr(legacy_cycle_native, '_load_native_search_module', lambda: fake_module)
+    monkeypatch.setattr(LegacyCycleRunner, 'run', fake_run)
+
+    run_legacy_cycle(engine)
+
+    assert fake_module.calls == 1
+    assert marker['calls'] == 0
+
+
+def test_native_agent_basket_planner_returns_active_need_candidate() -> None:
+    engine, runner = _build_basket_exchange_runner()
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_plan_exchange_basket:
+        pytest.skip('native basket planner is not available')
+
+    candidates = native_cycle.plan_exchange_basket(
+        agent_id=0,
+        deal_type=2,
+        forbidden_offer_by_need=np.zeros((engine.config.goods, engine.config.goods), dtype=np.bool_),
+    )
+
+    assert candidates
+    score, need_good, friend_slot, friend_id, offer_good = candidates[0]
+    assert score > 0.0
+    assert (need_good, friend_slot, friend_id, offer_good) == (1, 0, 1, 0)
+
+
+def test_parallel_phenomenon_planner_returns_execution_ready_candidate() -> None:
+    _engine, runner = _build_basket_exchange_runner(experimental_parallel_phenomenon_exchange=True)
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_plan_parallel_phenomenon_candidates:
+        pytest.skip('native parallel phenomenon planner is not available')
+
+    candidates, reasons = runner._collect_experimental_exchange_candidates(
+        deal_type=2,
+        proposer_ids=(0,),
+        blocked_partner_ids=set(),
+        one_candidate_per_agent=False,
+    )
+
+    assert reasons == {}
+    assert candidates
+    candidate = candidates[0]
+    assert candidate.agent_id == 0
+    assert candidate.need_good == 1
+    assert candidate.exchange.friend_id == 1
+    assert candidate.exchange.offer_good == 0
+    assert candidate.execution_plan is not None
+    assert candidate.execution_plan.max_exchange > 0.0
+
+
+def test_parallel_phenomenon_batches_execute_planned_trade() -> None:
+    _engine, runner = _build_basket_exchange_runner(experimental_parallel_phenomenon_exchange=True)
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_plan_parallel_phenomenon_candidates:
+        pytest.skip('native parallel phenomenon planner is not available')
+
+    need_before = float(runner.state.need[0, 1])
+    stock_before = float(runner.state.stock[0, 0])
+
+    plan = runner.execute_experimental_consumption_batches(
+        batch_count=1,
+        proposer_ids=(0,),
+        blocked_partner_ids=set(),
+        one_candidate_per_agent=False,
+    )
+
+    assert plan.scheduled_count == 1
+    assert runner.engine._accepted_trade_count == 1
+    assert float(runner.state.need[0, 1]) < need_before
+    assert float(runner.state.stock[0, 0]) < stock_before
+
+
+def test_session_clearing_phenomenon_stage_executes_local_session() -> None:
+    _engine, runner = _build_basket_exchange_runner(
+        experimental_session_clearing_phenomenon_exchange=True
+    )
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_run_agent_basket_exchange_stage:
+        pytest.skip('native basket exchange stage is not available')
+
+    need_before = float(runner.state.need[0, 1])
+    stock_before = float(runner.state.stock[0, 0])
+
+    runner._run_fixed_hybrid_exchange_stage(
+        frontier_start=0,
+        frontier_agent_ids=(0,),
+        max_attempts=runner.config.goods * runner.config.acquaintances,
+        deal_type=2,
+        stage='consumption',
+    )
+
+    assert runner.engine._proposed_trade_count >= 1
+    assert runner.engine._accepted_trade_count >= 1
+    assert float(runner.state.need[0, 1]) < need_before
+    assert float(runner.state.stock[0, 0]) < stock_before
+    assert runner._hybrid_wave_diagnostics[-1].stage == 'consumption_session_clearing'
+
+
+def test_session_clearing_after_trade_replan_can_continue_session() -> None:
+    config = SimulationConfig(
+        population=3,
+        goods=3,
+        acquaintances=2,
+        active_acquaintances=2,
+        demand_candidates=2,
+        supply_candidates=2,
+        initial_stock_fraction=0.0,
+        experimental_session_clearing_phenomenon_exchange=True,
+        experimental_session_replan_after_trade=True,
+    )
+    engine = SimulationEngine.create(config=config, backend_name='numpy')
+    runner = LegacyCycleRunner(engine)
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_run_phenomenon_session_stage:
+        pytest.skip('native session-clearing stage is not available')
+
+    state = engine.state
+    market = state.market
+    market.elastic_need[...] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    state.needs_level[...] = 1.0
+    state.friend_id[...] = np.array(
+        [
+            [1, 2],
+            [0, 2],
+            [0, 1],
+        ],
+        dtype=np.int32,
+    )
+    state.friend_activity[...] = 2.0
+    state.transparency[...] = 1.0
+    runner._friend_slot_maps = runner._build_friend_slot_maps()
+    state.stock[...] = np.array(
+        [
+            [40.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ],
+        dtype=np.float32,
+    )
+    state.stock_limit[...] = 50.0
+    state.need[...] = np.array(
+        [
+            [0.0, 5.0, 5.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    state.purchase_price[...] = np.array(
+        [
+            [1.0, 3.0, 3.0],
+            [3.0, 1.0, 3.0],
+            [3.0, 3.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    state.sales_price[...] = 1.0
+    state.role[...] = np.array(
+        [
+            [ROLE_CONSUMER, ROLE_CONSUMER, ROLE_CONSUMER],
+            [ROLE_RETAILER, ROLE_CONSUMER, ROLE_CONSUMER],
+            [ROLE_RETAILER, ROLE_CONSUMER, ROLE_CONSUMER],
+        ],
+        dtype=np.int32,
+    )
+
+    runner._run_fixed_hybrid_exchange_stage(
+        frontier_start=0,
+        frontier_agent_ids=(0,),
+        max_attempts=runner.config.goods * runner.config.acquaintances,
+        deal_type=2,
+        stage='consumption',
+    )
+
+    assert runner.engine._accepted_trade_count >= 2
+    assert float(runner.state.need[0, 1]) < 5.0
+    assert float(runner.state.need[0, 2]) < 5.0
+
+
+def test_agent_basket_planning_executes_trade_through_native_stage() -> None:
+    _engine, runner = _build_basket_exchange_runner(experimental_agent_basket_planning=True)
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_run_agent_basket_exchange_stage:
+        pytest.skip('native basket exchange stage is not available')
+
+    need_before = float(runner.state.need[0, 1])
+    stock_before = float(runner.state.stock[0, 0])
+
+    runner._satisfy_needs_by_exchange(0)
+
+    assert runner.engine._proposed_trade_count >= 1
+    assert runner.engine._accepted_trade_count >= 1
+    assert float(runner.state.need[0, 1]) < need_before
+    assert float(runner.state.stock[0, 0]) < stock_before
+
+
+def test_python_basket_fallback_still_executes_trade() -> None:
+    _engine, runner = _build_basket_exchange_runner(experimental_agent_basket_planning=True)
+    native_cycle = runner._native_cycle
+    if native_cycle is None or not native_cycle.supports_plan_exchange_basket:
+        pytest.skip('native basket planner is not available')
+
+    need_before = float(runner.state.need[0, 1])
+    stock_before = float(runner.state.stock[0, 0])
+
+    runner._run_agent_basket_exchange_stage_python(0, 2)
+
+    assert runner.engine._proposed_trade_count >= 1
+    assert runner.engine._accepted_trade_count >= 1
+    assert float(runner.state.need[0, 1]) < need_before
+    assert float(runner.state.stock[0, 0]) < stock_before
+
+
+def _build_basket_exchange_runner(
+    *,
+    experimental_agent_basket_planning: bool = False,
+    experimental_parallel_phenomenon_exchange: bool = False,
+    experimental_session_clearing_phenomenon_exchange: bool = False,
+) -> tuple[SimulationEngine, LegacyCycleRunner]:
+    config = SimulationConfig(
+        population=2,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        initial_stock_fraction=0.0,
+        experimental_agent_basket_planning=experimental_agent_basket_planning,
+        experimental_parallel_phenomenon_exchange=experimental_parallel_phenomenon_exchange,
+        experimental_session_clearing_phenomenon_exchange=experimental_session_clearing_phenomenon_exchange,
+    )
+    engine = SimulationEngine.create(config=config, backend_name='numpy')
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+    market = state.market
+
+    market.elastic_need[...] = np.array([1.0, 1.0], dtype=np.float32)
+    state.needs_level[...] = 1.0
+    state.friend_id[...] = np.array([[1], [0]], dtype=np.int32)
+    state.friend_activity[...] = 2.0
+    state.transparency[...] = 1.0
+    runner._friend_slot_maps = runner._build_friend_slot_maps()
+
+    state.stock[...] = np.array(
+        [
+            [10.0, 0.0],
+            [0.0, 10.0],
+        ],
+        dtype=np.float32,
+    )
+    state.stock_limit[...] = 12.0
+    state.need[...] = np.array(
+        [
+            [0.0, 5.0],
+            [0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    state.purchase_price[...] = np.array(
+        [
+            [1.0, 2.0],
+            [2.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    state.sales_price[...] = 1.0
+    state.role[...] = np.array(
+        [
+            [ROLE_CONSUMER, ROLE_CONSUMER],
+            [ROLE_RETAILER, ROLE_CONSUMER],
+        ],
+        dtype=np.int32,
+    )
+    return engine, runner
 
 
 
@@ -420,6 +739,54 @@ def test_native_end_agent_period_matches_python_reference() -> None:
     assert np.allclose(native_engine.state.market.periodic_spoilage, python_engine.state.market.periodic_spoilage)
 
 
+def test_native_end_agent_period_does_not_apply_absent_legacy_price_floor() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=1,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        legacy_price_floor=None,
+        use_value_price_floor_fraction=0.0,
+    )
+    python_engine = SimulationEngine.create(config=config, backend_name='numpy')
+    native_engine = SimulationEngine.create(config=config, backend_name='numpy')
+    for engine in (python_engine, native_engine):
+        state = engine.state
+        state.stock[0, 0] = 100.0
+        state.stock_limit[0, 0] = 10.0
+        state.previous_stock_limit[0, 0] = 10.0
+        state.recent_sales[0, 0] = 0.0
+        state.recent_production[0, 0] = 0.0
+        state.recent_purchases[0, 0] = 0.0
+        state.produced_this_period[0, 0] = 0.0
+        state.sold_this_period[0, 0] = 0.0
+        state.purchased_this_period[0, 0] = 0.0
+        state.purchase_times[0, 0] = 1
+        state.sales_times[0, 0] = 0
+        state.talent_mask[0, 0] = 0.0
+        state.efficiency[0, 0] = 1.0
+        state.purchase_price[0, 0] = 0.049
+        state.sales_price[0, 0] = 0.049
+        state.needs_level[0] = 1.0
+        state.market.elastic_need[0] = 1.0
+
+    python_runner = LegacyCycleRunner(python_engine)
+    native_runner = LegacyCycleRunner(native_engine)
+    native_backend = _require_native_backend(native_runner)
+    if not native_backend.supports_end_agent_period:
+        pytest.skip('native end_agent_period is not available in this build')
+
+    python_runner._end_agent_period(0)
+    native_backend.end_agent_period(cycle=native_engine.cycle, agent_id=0)
+
+    assert python_engine.state.purchase_price[0, 0] < 0.05
+    assert native_engine.state.purchase_price[0, 0] == pytest.approx(
+        float(python_engine.state.purchase_price[0, 0])
+    )
+
+
 def test_native_prepare_agent_for_consumption_matches_python_reference() -> None:
     python_engine = _build_prepare_agent_engine()
     native_engine = _build_prepare_agent_engine()
@@ -467,6 +834,44 @@ def test_native_produce_need_matches_python_reference() -> None:
         state.need[0] = np.array([2.0, 5.0, 3.0], dtype=np.float32)
         state.efficiency[0] = np.array([2.0, 1.25, 4.0], dtype=np.float32)
         state.time_remaining[0] = 9.0
+        state.recent_production[0] = 0.0
+        state.produced_this_period[0] = 0.0
+        state.timeout[0] = 0
+
+    python_runner._produce_need(0)
+    produced_total = native_backend.produce_need(agent_id=0)
+
+    assert produced_total == pytest.approx(python_engine._production_total)
+    assert np.allclose(native_engine.state.need, python_engine.state.need)
+    assert np.allclose(native_engine.state.time_remaining, python_engine.state.time_remaining)
+    assert np.allclose(native_engine.state.recent_production, python_engine.state.recent_production)
+    assert np.allclose(native_engine.state.produced_this_period, python_engine.state.produced_this_period)
+    assert np.array_equal(native_engine.state.timeout, python_engine.state.timeout)
+
+
+def test_native_produce_need_matches_time_limited_python_reference() -> None:
+    config = SimulationConfig(
+        population=2,
+        goods=3,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        seed=2009,
+    )
+    python_engine = SimulationEngine.create(config=config, backend_name='numpy')
+    native_engine = SimulationEngine.create(config=config, backend_name='numpy')
+    python_runner = LegacyCycleRunner(python_engine)
+    native_runner = LegacyCycleRunner(native_engine)
+    native_backend = _require_native_backend(native_runner)
+    if not native_backend.supports_produce_need:
+        pytest.skip('native produce_need is not available in this build')
+
+    for engine in (python_engine, native_engine):
+        state = engine.state
+        state.need[0] = np.array([10.0, 20.0, 5.0], dtype=np.float32)
+        state.efficiency[0] = np.array([1.0, 2.0, 5.0], dtype=np.float32)
+        state.time_remaining[0] = 10.5
         state.recent_production[0] = 0.0
         state.produced_this_period[0] = 0.0
         state.timeout[0] = 0

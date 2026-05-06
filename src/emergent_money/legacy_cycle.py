@@ -177,19 +177,31 @@ class LegacyCycleRunner:
         self._satisfy_needs_by_exchange(agent_id)
         self._complete_agent_cycle_after_consumption(agent_id)
 
+    def _uses_experimental_phenomenon_exchange(self) -> bool:
+        return bool(
+            self.config.experimental_parallel_phenomenon_exchange
+            or self.config.experimental_session_clearing_phenomenon_exchange
+        )
+
     def _uses_experimental_hybrid_consumption(self) -> bool:
+        if self._uses_experimental_phenomenon_exchange():
+            return True
         return bool(
             self.config.experimental_hybrid_consumption_stage
             and self.config.experimental_hybrid_batches > 0
         )
 
     def _uses_experimental_hybrid_surplus(self) -> bool:
+        if self._uses_experimental_phenomenon_exchange():
+            return True
         return bool(
             self.config.experimental_hybrid_surplus_stage
             and self.config.experimental_hybrid_batches > 0
         )
 
     def _uses_experimental_hybrid_exchange(self) -> bool:
+        if self._uses_experimental_phenomenon_exchange():
+            return True
         return bool(
             self.config.experimental_hybrid_batches > 0
             and (
@@ -285,22 +297,85 @@ class LegacyCycleRunner:
         stage: str,
     ) -> None:
         frontier_agent_set = set(frontier_agent_ids)
-        blocked_partner_ids = frontier_agent_set if self.config.experimental_hybrid_block_frontier_partners else set()
-        active_agent_ids = tuple(
-            agent_id
-            for agent_id in frontier_agent_ids
-            if self._has_remaining_hybrid_stage_need(agent_id, deal_type)
+        block_frontier_partners = (
+            self.config.experimental_hybrid_block_frontier_partners
+            and not self._uses_experimental_phenomenon_exchange()
         )
+        blocked_partner_ids = frontier_agent_set if block_frontier_partners else set()
+        batch_count = self._resolved_experimental_hybrid_batch_count()
+        # The phenomenon path still evaluates the full local opportunity set in
+        # Rust, but only materializes the active agent's best next proposal.
+        # Returning every per-good fallback to Python makes scheduling dominate
+        # at 100 goods while violating the one-concrete-decision-per-agent rule.
+        one_candidate_per_agent = True
+        if self.config.experimental_session_clearing_phenomenon_exchange:
+            self._run_session_clearing_phenomenon_stage(
+                frontier_start=frontier_start,
+                frontier_agent_ids=frontier_agent_ids,
+                max_attempts=max_attempts,
+                deal_type=deal_type,
+                stage=stage,
+            )
+            return
+        if (
+            self.config.experimental_parallel_phenomenon_exchange
+            and self._native_cycle is not None
+            and self._native_cycle.supports_run_parallel_phenomenon_stage
+        ):
+            (
+                native_wave_count,
+                candidate_agents_total,
+                scheduled_exchanges_total,
+                dropped_exchanges_total,
+                scheduled_quantity_total,
+                executed_quantity_total,
+                inventory_trade_volume,
+                exhausted_agents_total,
+                stalled_waves_total,
+            ) = self._native_cycle.run_parallel_phenomenon_stage(
+                deal_type=deal_type,
+                proposer_ids=frontier_agent_ids,
+                max_attempts=max_attempts,
+            )
+            self.engine._proposed_trade_count += scheduled_exchanges_total
+            self.engine._accepted_trade_count += scheduled_exchanges_total
+            self.engine._accepted_trade_volume += executed_quantity_total
+            self.engine._inventory_trade_volume += inventory_trade_volume
+            self._record_hybrid_native_stage_diagnostics(
+                stage=stage,
+                frontier_start=frontier_start,
+                frontier_agents=len(frontier_agent_ids),
+                native_wave_count=native_wave_count,
+                candidate_agents_total=candidate_agents_total,
+                scheduled_exchanges_total=scheduled_exchanges_total,
+                dropped_exchanges_total=dropped_exchanges_total,
+                scheduled_quantity_total=scheduled_quantity_total,
+                executed_quantity_total=executed_quantity_total,
+                exhausted_agents_total=exhausted_agents_total,
+                stalled_waves_total=stalled_waves_total,
+            )
+            return
+        if self.config.experimental_parallel_phenomenon_exchange:
+            # Avoid a Python-side full goods scan before every Rust planning
+            # wave. The native planner is already the source of truth for
+            # whether an agent can still form an execution-ready proposal.
+            active_agent_ids = tuple(frontier_agent_ids)
+        else:
+            active_agent_ids = tuple(
+                agent_id
+                for agent_id in frontier_agent_ids
+                if self._has_remaining_hybrid_stage_need(agent_id, deal_type)
+            )
         attempts_remaining = {agent_id: max_attempts for agent_id in active_agent_ids}
         wave_offset = 0
         while active_agent_ids:
             incoming_active_agents = len(active_agent_ids)
             plan = self._plan_hybrid_batches_for_stage(
                 deal_type=deal_type,
-                batch_count=self.config.experimental_hybrid_batches,
+                batch_count=batch_count,
                 proposer_ids=active_agent_ids,
                 blocked_partner_ids=blocked_partner_ids,
-                one_candidate_per_agent=True,
+                one_candidate_per_agent=one_candidate_per_agent,
                 seed_offset=(frontier_start * self.config.experimental_hybrid_seed_stride) + wave_offset,
             )
             if plan.scheduled_count <= 0:
@@ -323,18 +398,31 @@ class LegacyCycleRunner:
                 attempts_remaining[agent_id] -= 1
             executed_exchanges, execution_failure_reasons, scheduled_quantity_total, executed_quantity_total = self._execute_hybrid_batch_plan(plan)
             candidate_agent_set = set(plan.candidate_agent_ids)
-            exhausted_retry_agents = sum(
-                1
-                for agent_id in candidate_agent_set
-                if attempts_remaining[agent_id] <= 0 and self._has_remaining_hybrid_stage_need(agent_id, deal_type)
-            )
-            next_active_agent_ids = tuple(
-                agent_id
-                for agent_id in active_agent_ids
-                if attempts_remaining[agent_id] > 0
-                and agent_id in candidate_agent_set
-                and self._has_remaining_hybrid_stage_need(agent_id, deal_type)
-            )
+            if self.config.experimental_parallel_phenomenon_exchange:
+                exhausted_retry_agents = sum(
+                    1
+                    for agent_id in candidate_agent_set
+                    if attempts_remaining[agent_id] <= 0
+                )
+                next_active_agent_ids = tuple(
+                    agent_id
+                    for agent_id in active_agent_ids
+                    if attempts_remaining[agent_id] > 0
+                    and agent_id in candidate_agent_set
+                )
+            else:
+                exhausted_retry_agents = sum(
+                    1
+                    for agent_id in candidate_agent_set
+                    if attempts_remaining[agent_id] <= 0 and self._has_remaining_hybrid_stage_need(agent_id, deal_type)
+                )
+                next_active_agent_ids = tuple(
+                    agent_id
+                    for agent_id in active_agent_ids
+                    if attempts_remaining[agent_id] > 0
+                    and agent_id in candidate_agent_set
+                    and self._has_remaining_hybrid_stage_need(agent_id, deal_type)
+                )
             self._record_hybrid_wave_diagnostics(
                 stage=stage,
                 frontier_start=frontier_start,
@@ -349,8 +437,127 @@ class LegacyCycleRunner:
                 exhausted_retry_agents=exhausted_retry_agents,
                 remaining_active_agents=len(next_active_agent_ids),
             )
+            if (
+                self.config.experimental_parallel_phenomenon_exchange
+                and len(next_active_agent_ids) == 1
+                and self._native_cycle is not None
+                and self._native_cycle.supports_run_parallel_phenomenon_agent_tail
+            ):
+                tail_agent_id = next_active_agent_ids[0]
+                tail_attempts = max(int(attempts_remaining.get(tail_agent_id, 0)), 0)
+                if tail_attempts > 0:
+                    (
+                        tail_executed,
+                        tail_scheduled_quantity,
+                        tail_executed_quantity,
+                        tail_inventory_volume,
+                        tail_attempts_used,
+                    ) = self._native_cycle.run_parallel_phenomenon_agent_tail(
+                        agent_id=tail_agent_id,
+                        deal_type=deal_type,
+                        attempts_remaining=tail_attempts,
+                    )
+                    self.engine._proposed_trade_count += tail_attempts_used
+                    self.engine._accepted_trade_count += tail_executed
+                    self.engine._accepted_trade_volume += tail_executed_quantity
+                    self.engine._inventory_trade_volume += tail_inventory_volume
+                    self._record_hybrid_tail_diagnostics(
+                        stage=stage,
+                        frontier_start=frontier_start,
+                        frontier_agents=len(frontier_agent_ids),
+                        wave_offset=wave_offset + 1,
+                        agent_id=tail_agent_id,
+                        attempts_used=tail_attempts_used,
+                        executed_exchanges=tail_executed,
+                        scheduled_quantity_total=tail_scheduled_quantity,
+                        executed_quantity_total=tail_executed_quantity,
+                    )
+                    active_agent_ids = ()
+                    break
             active_agent_ids = next_active_agent_ids
             wave_offset += 1
+
+    def _run_session_clearing_phenomenon_stage(
+        self,
+        *,
+        frontier_start: int,
+        frontier_agent_ids: tuple[int, ...],
+        max_attempts: int,
+        deal_type: int,
+        stage: str,
+    ) -> None:
+        if (
+            self._native_cycle is None
+            or not (
+                self._native_cycle.supports_run_phenomenon_session_stage
+                or self._native_cycle.supports_run_agent_basket_exchange_stage
+            )
+        ):
+            raise RuntimeError(
+                "experimental_session_clearing_phenomenon_exchange requires the rebuilt native Rust extension"
+            )
+
+        if self._native_cycle.supports_run_phenomenon_session_stage:
+            (
+                proposed_total,
+                accepted_total,
+                accepted_volume_total,
+                inventory_trade_volume_total,
+                active_session_agents,
+            ) = self._native_cycle.run_phenomenon_session_stage(
+                deal_type=deal_type,
+                proposer_ids=frontier_agent_ids,
+                max_attempts=max_attempts,
+            )
+        else:
+            active_session_agents = 0
+            proposed_total = 0
+            accepted_total = 0
+            accepted_volume_total = 0.0
+            inventory_trade_volume_total = 0.0
+            for agent_id in frontier_agent_ids:
+                proposed_count, accepted_count, accepted_volume, inventory_trade_volume = (
+                    self._native_cycle.run_agent_basket_exchange_stage(
+                        agent_id=agent_id,
+                        deal_type=deal_type,
+                    )
+                )
+                if proposed_count > 0:
+                    active_session_agents += 1
+                proposed_total += proposed_count
+                accepted_total += accepted_count
+                accepted_volume_total += accepted_volume
+                inventory_trade_volume_total += inventory_trade_volume
+
+        self.engine._proposed_trade_count += proposed_total
+        self.engine._accepted_trade_count += accepted_total
+        self.engine._accepted_trade_volume += accepted_volume_total
+        self.engine._inventory_trade_volume += inventory_trade_volume_total
+        execution_failures = max(proposed_total - accepted_total, 0)
+        self._hybrid_wave_diagnostics.append(
+            HybridWaveDiagnostics(
+                stage=f"{stage}_session_clearing",
+                frontier_start=frontier_start,
+                frontier_agents=len(frontier_agent_ids),
+                wave_offset=0,
+                incoming_active_agents=len(frontier_agent_ids),
+                candidate_agents=active_session_agents,
+                no_candidate_agents=max(len(frontier_agent_ids) - active_session_agents, 0),
+                no_candidate_reasons={"max_attempts": int(max_attempts)},
+                scheduled_exchanges=proposed_total,
+                scheduled_quantity_total=accepted_volume_total,
+                dropped_exchanges=0,
+                executed_exchanges=accepted_total,
+                executed_quantity_total=accepted_volume_total,
+                execution_failure_reasons=(
+                    {"revalidated_session_skip": execution_failures}
+                    if execution_failures > 0
+                    else {}
+                ),
+                exhausted_retry_agents=0,
+                remaining_active_agents=0,
+            )
+        )
 
     def _run_cycle_with_rolling_experimental_consumption(self, frontier_size: int, max_attempts: int) -> None:
         next_agent_id = 0
@@ -371,10 +578,14 @@ class LegacyCycleRunner:
         while active_agent_ids:
             active_tuple = tuple(active_agent_ids)
             frontier_start = active_tuple[0]
-            blocked_partner_ids = set(active_tuple) if self.config.experimental_hybrid_block_frontier_partners else set()
+            block_frontier_partners = (
+                self.config.experimental_hybrid_block_frontier_partners
+                and not self._uses_experimental_phenomenon_exchange()
+            )
+            blocked_partner_ids = set(active_tuple) if block_frontier_partners else set()
             incoming_active_agents = len(active_tuple)
             plan = self.plan_experimental_consumption_batches(
-                batch_count=self.config.experimental_hybrid_batches,
+                batch_count=self._resolved_experimental_hybrid_batch_count(),
                 proposer_ids=active_tuple,
                 blocked_partner_ids=blocked_partner_ids,
                 one_candidate_per_agent=True,
@@ -446,7 +657,16 @@ class LegacyCycleRunner:
     def _resolved_experimental_hybrid_frontier_size(self) -> int:
         if self.config.experimental_hybrid_frontier_size > 0:
             return self.config.experimental_hybrid_frontier_size
+        if self._uses_experimental_phenomenon_exchange():
+            return self.config.population
         return max(1, self.config.experimental_hybrid_batches)
+
+    def _resolved_experimental_hybrid_batch_count(self) -> int:
+        if self.config.experimental_hybrid_batches > 0:
+            return self.config.experimental_hybrid_batches
+        if self._uses_experimental_phenomenon_exchange():
+            return 1
+        return 1
 
     def _has_unmet_consumption_need(self, agent_id: int) -> bool:
         return bool(np.any(self.state.need[agent_id] >= 1.0))
@@ -484,6 +704,8 @@ class LegacyCycleRunner:
         )
 
     def _uses_experimental_native_stage_math(self) -> bool:
+        if self._uses_experimental_phenomenon_exchange():
+            return self._native_cycle is not None
         return bool(
             self.config.experimental_native_stage_math
             and not self._uses_experimental_hybrid_exchange()
@@ -493,10 +715,17 @@ class LegacyCycleRunner:
     def _uses_experimental_native_exchange_stage(self) -> bool:
         return bool(
             self.config.experimental_native_exchange_stage
-            and getattr(self.engine, '_allow_rejected_native_exchange_stage', False)
             and not self._uses_experimental_hybrid_exchange()
             and self._native_cycle is not None
             and self._native_cycle.supports_run_exchange_stage
+        )
+
+    def _uses_experimental_agent_basket_planning(self) -> bool:
+        return bool(
+            self.config.experimental_agent_basket_planning
+            and not self._uses_experimental_hybrid_exchange()
+            and self._native_cycle is not None
+            and self._native_cycle.supports_plan_exchange_basket
         )
 
     def _prepare_agent_for_consumption(self, agent_id: int) -> None:
@@ -517,12 +746,17 @@ class LegacyCycleRunner:
 
     def _complete_agent_cycle_after_consumption(self, agent_id: int) -> None:
         self._advance_agent_to_surplus_stage(agent_id)
+        if self.config.legacy_extra_demand_round:
+            self._run_leisure_round(agent_id)
         self._make_surplus_deals(agent_id)
         self._complete_agent_period_after_surplus(agent_id)
 
     def _advance_agent_to_surplus_stage(self, agent_id: int) -> None:
         self._produce_need(agent_id)
-        self.state.period_failure[agent_id] = self.state.time_remaining[agent_id] < 0.0
+        self.state.period_failure[agent_id] = (
+            self.state.time_remaining[agent_id] < 0.0
+            or float(np.sum(self.state.need[agent_id])) > _EPSILON
+        )
         self._add_random_friend(agent_id)
 
         if self.state.period_time_debt[agent_id] < 0.0:
@@ -531,7 +765,6 @@ class LegacyCycleRunner:
             self.state.period_time_debt[agent_id] = half_debt
 
         self._surplus_production(agent_id)
-        self._run_leisure_round(agent_id)
 
     def _complete_agent_period_after_surplus(self, agent_id: int) -> None:
         self.state.period_time_debt[agent_id] += self.state.time_remaining[agent_id]
@@ -693,6 +926,10 @@ class LegacyCycleRunner:
         self.engine._stock_consumption_total += float(np.sum(consumed))
 
     def _satisfy_needs_by_exchange(self, agent_id: int) -> None:
+        if self._uses_experimental_agent_basket_planning():
+            self._run_agent_basket_exchange_stage(agent_id, _CONSUMPTION_DEAL)
+            return
+
         if self._uses_experimental_native_exchange_stage():
             proposed_count, accepted_count, accepted_volume, inventory_trade_volume = self._native_cycle.run_exchange_stage(
                 agent_id=agent_id,
@@ -712,6 +949,11 @@ class LegacyCycleRunner:
             ):
                 continue
 
+            # Legacy-C computes the gift matrix once per need and then keeps
+            # reusing the surviving gift options inside the while-loop. That
+            # allows an initially valid trade good to continue circulating even
+            # after its stock falls below the agent's own current need level.
+            base_offer_goods = self._collect_base_offer_goods(agent_id)
             forbidden_gifts: set[int] = set()
             attempts = 0
             while self.state.need[agent_id, need_good] >= 1.0 and attempts < max_attempts:
@@ -720,6 +962,7 @@ class LegacyCycleRunner:
                     need_good,
                     float(self.state.need[agent_id, need_good]),
                     forbidden_gifts,
+                    base_offer_goods=base_offer_goods,
                 )
                 if exchange is None:
                     break
@@ -737,6 +980,10 @@ class LegacyCycleRunner:
                 attempts += 1
 
     def _make_surplus_deals(self, agent_id: int) -> None:
+        if self._uses_experimental_agent_basket_planning():
+            self._run_agent_basket_exchange_stage(agent_id, _SURPLUS_DEAL)
+            return
+
         if self._uses_experimental_native_exchange_stage():
             proposed_count, accepted_count, accepted_volume, inventory_trade_volume = self._native_cycle.run_exchange_stage(
                 agent_id=agent_id,
@@ -751,29 +998,37 @@ class LegacyCycleRunner:
         max_attempts = self.config.goods * self.config.acquaintances
 
         for need_good in range(self.config.goods):
-            if not (
+            target_stock_limit = self._surplus_target_stock_limit(agent_id, need_good)
+            aspirational_target = self._aspirational_stock_target(agent_id, need_good)
+            if aspirational_target > target_stock_limit:
+                target_stock_limit = aspirational_target
+            legacy_surplus_signal = (
                 self.state.recent_sales[agent_id, need_good]
                 > (
                     self.state.recent_production[agent_id, need_good]
                     - self.market.elastic_need[need_good]
                 )
-                and self.state.stock[agent_id, need_good]
-                < (
-                    self.state.stock_limit[agent_id, need_good]
-                    - self.market.elastic_need[need_good]
-                )
-            ):
+            )
+            local_liquidity_signal = target_stock_limit > float(self.state.stock_limit[agent_id, need_good]) + _EPSILON
+            aspirational_stock_signal = self._has_aspirational_stock_gap(agent_id, need_good, aspirational_target)
+            if not (legacy_surplus_signal or local_liquidity_signal or aspirational_stock_signal):
+                continue
+            if self.state.stock[agent_id, need_good] >= (target_stock_limit - self.market.elastic_need[need_good]):
                 continue
 
+            # Legacy-C likewise keeps the initially valid gift set for the
+            # entire surplus-deals loop instead of re-filtering it after every
+            # accepted exchange.
+            base_offer_goods = self._collect_base_offer_goods(agent_id)
             forbidden_gifts: set[int] = set()
             attempts = 0
             while (
                 self.state.stock[agent_id, need_good]
-                < self.state.stock_limit[agent_id, need_good]
+                < target_stock_limit
                 and attempts < max_attempts
             ):
                 remaining_room = float(
-                    self.state.stock_limit[agent_id, need_good]
+                    target_stock_limit
                     - self.state.stock[agent_id, need_good]
                 )
                 exchange, execution_plan, _ = self._plan_best_exchange_with_reason(
@@ -781,6 +1036,7 @@ class LegacyCycleRunner:
                     need_good,
                     max(remaining_room, 0.0),
                     forbidden_gifts,
+                    base_offer_goods=base_offer_goods,
                 )
                 if exchange is None:
                     break
@@ -796,6 +1052,81 @@ class LegacyCycleRunner:
                 if not result.executed or result.exhausted_gift:
                     forbidden_gifts.add(exchange.offer_good)
                 attempts += 1
+
+    def _run_agent_basket_exchange_stage(self, agent_id: int, deal_type: int) -> None:
+        if self._native_cycle.supports_run_agent_basket_exchange_stage:
+            proposed_count, accepted_count, accepted_volume, inventory_trade_volume = self._native_cycle.run_agent_basket_exchange_stage(
+                agent_id=agent_id,
+                deal_type=deal_type,
+            )
+            self.engine._proposed_trade_count += proposed_count
+            self.engine._accepted_trade_count += accepted_count
+            self.engine._accepted_trade_volume += accepted_volume
+            self.engine._inventory_trade_volume += inventory_trade_volume
+            return
+
+        self._run_agent_basket_exchange_stage_python(agent_id, deal_type)
+
+    def _run_agent_basket_exchange_stage_python(self, agent_id: int, deal_type: int) -> None:
+        max_attempts = self.config.goods * self.config.acquaintances
+        forbidden_offer_by_need = np.zeros((self.config.goods, self.config.goods), dtype=np.bool_)
+        attempts = 0
+
+        while attempts < max_attempts:
+            candidates = self._native_cycle.plan_exchange_basket(
+                agent_id=agent_id,
+                deal_type=deal_type,
+                forbidden_offer_by_need=forbidden_offer_by_need,
+            )
+            if not candidates:
+                break
+
+            executed_any = False
+            changed_forbidden = False
+            processed_candidate = False
+            for score, need_good, friend_slot, friend_id, offer_good in candidates:
+                if attempts >= max_attempts:
+                    break
+                if forbidden_offer_by_need[need_good, offer_good]:
+                    continue
+
+                max_need = self._hybrid_exchange_need(
+                    agent_id=agent_id,
+                    need_good=need_good,
+                    deal_type=deal_type,
+                )
+                if max_need <= 0.0:
+                    continue
+
+                processed_candidate = True
+                self.engine._proposed_trade_count += 1
+                result = self._execute_exchange(
+                    deal_type=deal_type,
+                    agent_id=agent_id,
+                    need_good=need_good,
+                    max_need=max_need,
+                    exchange=ExchangeOption(
+                        score=float(score),
+                        friend_slot=int(friend_slot),
+                        friend_id=int(friend_id),
+                        offer_good=int(offer_good),
+                    ),
+                    execution_plan=None,
+                )
+                attempts += 1
+
+                if result.executed:
+                    executed_any = True
+                if not result.executed or result.exhausted_gift:
+                    if not forbidden_offer_by_need[need_good, offer_good]:
+                        forbidden_offer_by_need[need_good, offer_good] = True
+                        changed_forbidden = True
+                # Basket search may inspect all needs at once, but the agent
+                # still commits only one trade before re-evaluating inventory.
+                break
+
+            if not processed_candidate or (not executed_any and not changed_forbidden):
+                break
 
     def plan_experimental_consumption_batches(
         self,
@@ -883,7 +1214,7 @@ class LegacyCycleRunner:
     ) -> HybridExchangeBatchPlan:
         resolved_batch_count = batch_count
         if resolved_batch_count is None:
-            resolved_batch_count = self.config.experimental_hybrid_batches or 1
+            resolved_batch_count = self._resolved_experimental_hybrid_batch_count()
         if resolved_batch_count <= 0:
             raise ValueError("batch_count must be positive")
 
@@ -932,6 +1263,22 @@ class LegacyCycleRunner:
         )
 
     def _execute_hybrid_batch_plan(self, plan: HybridExchangeBatchPlan) -> tuple[int, dict[str, int], float, float]:
+        if (
+            self.config.experimental_parallel_phenomenon_exchange
+            and self._native_cycle is not None
+            and self._native_cycle.supports_execute_planned_parallel_phenomenon_batch
+        ):
+            candidates = [candidate for batch in plan.batches for candidate in batch]
+            if candidates and all(candidate.execution_plan is not None for candidate in candidates):
+                executed_count, scheduled_quantity_total, executed_quantity_total, inventory_trade_volume = (
+                    self._native_cycle.execute_planned_parallel_phenomenon_batch(candidates)
+                )
+                self.engine._proposed_trade_count += len(candidates)
+                self.engine._accepted_trade_count += executed_count
+                self.engine._accepted_trade_volume += executed_quantity_total
+                self.engine._inventory_trade_volume += inventory_trade_volume
+                return executed_count, {}, scheduled_quantity_total, executed_quantity_total
+
         executed_count = 0
         execution_failure_reasons: dict[str, int] = {}
         scheduled_quantity_total = 0.0
@@ -992,6 +1339,76 @@ class LegacyCycleRunner:
             )
         )
 
+    def _record_hybrid_tail_diagnostics(
+        self,
+        *,
+        stage: str,
+        frontier_start: int,
+        frontier_agents: int,
+        wave_offset: int,
+        agent_id: int,
+        attempts_used: int,
+        executed_exchanges: int,
+        scheduled_quantity_total: float,
+        executed_quantity_total: float,
+    ) -> None:
+        self._hybrid_wave_diagnostics.append(
+            HybridWaveDiagnostics(
+                stage=f"{stage}_native_tail",
+                frontier_start=frontier_start,
+                frontier_agents=frontier_agents,
+                wave_offset=wave_offset,
+                incoming_active_agents=1,
+                candidate_agents=1 if attempts_used > 0 else 0,
+                no_candidate_agents=0 if attempts_used > 0 else 1,
+                no_candidate_reasons={},
+                scheduled_exchanges=attempts_used,
+                scheduled_quantity_total=scheduled_quantity_total,
+                dropped_exchanges=0,
+                executed_exchanges=executed_exchanges,
+                executed_quantity_total=executed_quantity_total,
+                execution_failure_reasons={},
+                exhausted_retry_agents=1 if attempts_used > 0 else 0,
+                remaining_active_agents=0,
+            )
+        )
+
+    def _record_hybrid_native_stage_diagnostics(
+        self,
+        *,
+        stage: str,
+        frontier_start: int,
+        frontier_agents: int,
+        native_wave_count: int,
+        candidate_agents_total: int,
+        scheduled_exchanges_total: int,
+        dropped_exchanges_total: int,
+        scheduled_quantity_total: float,
+        executed_quantity_total: float,
+        exhausted_agents_total: int,
+        stalled_waves_total: int,
+    ) -> None:
+        self._hybrid_wave_diagnostics.append(
+            HybridWaveDiagnostics(
+                stage=f"{stage}_native_stage",
+                frontier_start=frontier_start,
+                frontier_agents=frontier_agents,
+                wave_offset=max(int(native_wave_count) - 1, 0),
+                incoming_active_agents=frontier_agents,
+                candidate_agents=candidate_agents_total,
+                no_candidate_agents=0,
+                no_candidate_reasons={"native_waves": int(native_wave_count)},
+                scheduled_exchanges=scheduled_exchanges_total,
+                scheduled_quantity_total=scheduled_quantity_total,
+                dropped_exchanges=dropped_exchanges_total,
+                executed_exchanges=scheduled_exchanges_total,
+                executed_quantity_total=executed_quantity_total,
+                execution_failure_reasons={},
+                exhausted_retry_agents=exhausted_agents_total,
+                remaining_active_agents=0 if stalled_waves_total >= 0 else 0,
+            )
+        )
+
     def _finalize_hybrid_cycle_diagnostics(self, frontier_size: int, *, consumption_stage: bool, surplus_stage: bool) -> None:
         wave_rows = [asdict(item) for item in self._hybrid_wave_diagnostics]
         wave_count = len(wave_rows)
@@ -1022,7 +1439,12 @@ class LegacyCycleRunner:
             'frontier_size': frontier_size,
             'consumption_stage': consumption_stage,
             'surplus_stage': surplus_stage,
-            'block_frontier_partners': self.config.experimental_hybrid_block_frontier_partners,
+            'parallel_phenomenon_exchange': self.config.experimental_parallel_phenomenon_exchange,
+            'session_clearing_phenomenon_exchange': self.config.experimental_session_clearing_phenomenon_exchange,
+            'block_frontier_partners': (
+                self.config.experimental_hybrid_block_frontier_partners
+                and not self._uses_experimental_phenomenon_exchange()
+            ),
             'preserve_proposer_order': self.config.experimental_hybrid_preserve_proposer_order,
             'rolling_frontier': self.config.experimental_hybrid_rolling_frontier,
             'stage_wave_counts': stage_wave_counts,
@@ -1066,6 +1488,13 @@ class LegacyCycleRunner:
         no_candidate_reasons: dict[str, int] = {}
         resolved_proposer_ids = proposer_ids or tuple(range(self.config.population))
         blocked_partner_ids = blocked_partner_ids or set()
+        if self.config.experimental_parallel_phenomenon_exchange:
+            return self._collect_parallel_phenomenon_exchange_candidates(
+                deal_type=deal_type,
+                proposer_ids=resolved_proposer_ids,
+                blocked_partner_ids=blocked_partner_ids,
+                one_candidate_per_agent=one_candidate_per_agent,
+            )
 
         for agent_id in resolved_proposer_ids:
             if one_candidate_per_agent:
@@ -1102,6 +1531,69 @@ class LegacyCycleRunner:
                     )
                 )
         return candidates, no_candidate_reasons
+
+    def _collect_parallel_phenomenon_exchange_candidates(
+        self,
+        *,
+        deal_type: int,
+        proposer_ids: tuple[int, ...],
+        blocked_partner_ids: set[int],
+        one_candidate_per_agent: bool,
+    ) -> tuple[list[PlannedHybridExchange], dict[str, int]]:
+        if self._native_cycle is None or not self._native_cycle.supports_plan_parallel_phenomenon_candidates:
+            raise RuntimeError(
+                "experimental_parallel_phenomenon_exchange requires the rebuilt native Rust extension"
+            )
+
+        raw_candidates = self._native_cycle.plan_parallel_phenomenon_candidates(
+            deal_type=deal_type,
+            proposer_ids=proposer_ids,
+            blocked_partner_ids=blocked_partner_ids,
+            one_candidate_per_agent=one_candidate_per_agent,
+        )
+        candidates: list[PlannedHybridExchange] = []
+        for (
+            score,
+            agent_id,
+            need_good,
+            max_need,
+            friend_slot,
+            friend_id,
+            offer_good,
+            reciprocal_slot,
+            max_exchange,
+            switch_average,
+            need_transparency,
+            receiving_transparency,
+        ) in raw_candidates:
+            exchange = ExchangeOption(
+                score=score,
+                friend_slot=friend_slot,
+                friend_id=friend_id,
+                offer_good=offer_good,
+            )
+            execution_plan = ExchangePlanResult(
+                score=score,
+                friend_slot=friend_slot,
+                friend_id=friend_id,
+                offer_good=offer_good,
+                reciprocal_slot=reciprocal_slot,
+                max_exchange=max_exchange,
+                switch_average=switch_average,
+                need_transparency=need_transparency,
+                receiving_transparency=receiving_transparency,
+            )
+            candidates.append(
+                PlannedHybridExchange(
+                    deal_type=deal_type,
+                    agent_id=agent_id,
+                    need_good=need_good,
+                    max_need=max_need,
+                    exchange=exchange,
+                    execution_plan=execution_plan,
+                )
+            )
+        return candidates, {}
 
     def _collect_first_experimental_exchange_candidate(
         self,
@@ -1174,20 +1666,114 @@ class LegacyCycleRunner:
                 return 0.0
             return max_need
 
-        if not (
+        target_stock_limit = self._surplus_target_stock_limit(agent_id, need_good)
+        aspirational_target = self._aspirational_stock_target(agent_id, need_good)
+        if aspirational_target > target_stock_limit:
+            target_stock_limit = aspirational_target
+        legacy_surplus_signal = (
             self.state.recent_sales[agent_id, need_good]
             > (
                 self.state.recent_production[agent_id, need_good]
                 - self.market.elastic_need[need_good]
             )
-            and self.state.stock[agent_id, need_good]
-            < (
-                self.state.stock_limit[agent_id, need_good]
-                - self.market.elastic_need[need_good]
-            )
-        ):
+        )
+        local_liquidity_signal = target_stock_limit > float(self.state.stock_limit[agent_id, need_good]) + _EPSILON
+        aspirational_stock_signal = self._has_aspirational_stock_gap(agent_id, need_good, aspirational_target)
+        if not (legacy_surplus_signal or local_liquidity_signal or aspirational_stock_signal):
             return 0.0
-        return max(float(self.state.stock_limit[agent_id, need_good] - self.state.stock[agent_id, need_good]), 0.0)
+        if self.state.stock[agent_id, need_good] >= (target_stock_limit - self.market.elastic_need[need_good]):
+            return 0.0
+        return max(float(target_stock_limit - self.state.stock[agent_id, need_good]), 0.0)
+
+    def _surplus_target_stock_limit(self, agent_id: int, good_id: int) -> float:
+        base_limit = float(self.state.stock_limit[agent_id, good_id])
+        bias = float(self.config.experimental_local_liquidity_stock_bias)
+        if bias <= _EPSILON:
+            return base_limit
+        liquidity_score = self._local_liquidity_score(agent_id, good_id)
+        if liquidity_score <= _EPSILON:
+            return base_limit
+        stock_scale = self._local_liquidity_stock_scale(agent_id, good_id)
+        if stock_scale <= _EPSILON:
+            return base_limit
+        return base_limit + (bias * stock_scale * liquidity_score)
+
+    def _aspirational_stock_target(self, agent_id: int, good_id: int) -> float:
+        target_multiplier = float(self.config.experimental_aspirational_stock_target)
+        if target_multiplier <= _EPSILON:
+            return 0.0
+        own_need_target = (
+            float(self.market.elastic_need[good_id])
+            * float(self.state.needs_level[agent_id])
+            * target_multiplier
+        )
+        return min(float(self.state.stock_limit[agent_id, good_id]), own_need_target)
+
+    def _has_aspirational_stock_gap(self, agent_id: int, good_id: int, aspirational_target: float) -> bool:
+        if aspirational_target <= _EPSILON:
+            return False
+        return float(self.state.stock[agent_id, good_id]) < (aspirational_target - self.config.min_trade_quantity)
+
+    def _local_liquidity_stock_scale(self, agent_id: int, good_id: int) -> float:
+        """Observed local intermediary flow, in physical units.
+
+        The optional liquidity buffer must not scale from the good's own-use
+        need. That would bias storage toward high-consumption goods instead of
+        goods observed to circulate locally as exchange media.
+        """
+        friend_row = self.state.friend_id[agent_id]
+        known_mask = friend_row >= 0
+        observed_acceptance = 0.0
+        if np.any(known_mask):
+            sold_to_friend = self.state.friend_sold[agent_id, known_mask, good_id].astype(np.float64, copy=False)
+            observed_acceptance = float(np.sum(sold_to_friend, dtype=np.float64))
+
+        own_sales = float(self.state.recent_sales[agent_id, good_id])
+        own_sources = float(
+            self.state.recent_purchases[agent_id, good_id]
+            + self.state.recent_inventory_inflow[agent_id, good_id]
+        )
+        observed_turnover = max(min(own_sales, own_sources), 0.0)
+        bootstrap_floor = max(float(self.config.experimental_local_liquidity_min_sales), 1.0)
+        return max(observed_turnover, observed_acceptance, bootstrap_floor)
+
+    def _local_liquidity_score(self, agent_id: int, good_id: int) -> float:
+        friend_row = self.state.friend_id[agent_id]
+        known_mask = friend_row >= 0
+        known_count = int(np.count_nonzero(known_mask))
+        if known_count <= 0:
+            return 0.0
+
+        sold_to_friend = self.state.friend_sold[agent_id, known_mask, good_id].astype(np.float64, copy=False)
+        observed_acceptance = float(np.sum(sold_to_friend, dtype=np.float64))
+        if observed_acceptance < float(self.config.experimental_local_liquidity_min_sales):
+            return 0.0
+
+        accepting_mask = sold_to_friend > 0.0
+        acceptance_breadth = float(np.count_nonzero(accepting_mask)) / float(known_count)
+        if acceptance_breadth <= _EPSILON:
+            return 0.0
+
+        transparency_row = self.state.transparency[agent_id, known_mask, good_id].astype(np.float64, copy=False)
+        if np.any(accepting_mask):
+            transparency_score = float(np.mean(transparency_row[accepting_mask], dtype=np.float64))
+        else:
+            transparency_score = float(np.mean(transparency_row, dtype=np.float64))
+
+        own_sales = float(self.state.recent_sales[agent_id, good_id])
+        own_sources = float(
+            self.state.recent_purchases[agent_id, good_id]
+            + self.state.recent_inventory_inflow[agent_id, good_id]
+            + self.state.recent_production[agent_id, good_id]
+        )
+        turnover_score = 1.0
+        if own_sales > _EPSILON or own_sources > _EPSILON:
+            turnover_score = min(own_sales, own_sources) / max(own_sales, own_sources, _EPSILON)
+
+        volume_scale = max(float(self.config.experimental_local_liquidity_min_sales) * float(self.config.history), 1.0)
+        volume_score = min(1.0, observed_acceptance / volume_scale)
+        score = transparency_score * sqrt(acceptance_breadth) * max(turnover_score, 0.25) * volume_score
+        return float(max(0.0, min(score, 1.0)))
 
     def _hybrid_stage_seed(self, deal_type: int, *, seed_offset: int = 0) -> int:
         return int(
@@ -1534,20 +2120,33 @@ class LegacyCycleRunner:
             friend_need_sales_price / max(need_transparency, _EPSILON),
             _EPSILON,
         )
-        my_value_correction = sqrt(max(float(exchange_value_to_me), 0.0))
-        friend_value_correction = sqrt(max(float(exchange_value_to_friend), 0.0))
+        my_value_correction = sqrt(max(float(exchange_value_to_me), _EPSILON))
+        friend_value_correction = sqrt(max(float(exchange_value_to_friend), _EPSILON))
+        my_purchase_unit_value = my_need_purchase_price / max(my_value_correction, _EPSILON)
+        my_sales_unit_value = my_offer_sales_price * my_value_correction
+        friend_purchase_unit_value = friend_offer_purchase_price / max(friend_value_correction, _EPSILON)
+        friend_sales_unit_value = friend_need_sales_price * friend_value_correction
+
+        state.recent_purchase_value[agent_id, need_good] += max_exchange * my_purchase_unit_value
+        state.recent_sales_value[agent_id, offer_good] += friend_gift_in * my_sales_unit_value
+        state.recent_purchase_value[friend_id, offer_good] += friend_gift_in * friend_purchase_unit_value
+        state.recent_sales_value[friend_id, need_good] += friend_need_out * friend_sales_unit_value
+        if deal_type == _SURPLUS_DEAL:
+            state.recent_inventory_inflow_value[agent_id, need_good] += max_exchange * my_purchase_unit_value
+        state.recent_inventory_inflow_value[friend_id, offer_good] += friend_gift_in * friend_purchase_unit_value
+
         if my_value_correction > 1.0 and friend_value_correction > 1.0:
             state.sum_period_purchase_value[agent_id, need_good] += (
-                my_need_purchase_price / my_value_correction
+                my_purchase_unit_value
             )
             state.sum_period_sales_value[agent_id, offer_good] += (
-                my_offer_sales_price * my_value_correction
+                my_sales_unit_value
             )
             state.sum_period_purchase_value[friend_id, offer_good] += (
-                friend_offer_purchase_price / friend_value_correction
+                friend_purchase_unit_value
             )
             state.sum_period_sales_value[friend_id, need_good] += (
-                friend_need_sales_price * friend_value_correction
+                friend_sales_unit_value
             )
 
         state.trade.proposal_friend_slot[agent_id] = friend_slot
@@ -1567,34 +2166,50 @@ class LegacyCycleRunner:
 
     def _produce_need(self, agent_id: int) -> None:
         if self._uses_experimental_native_stage_math() and self._native_cycle.supports_produce_need:
-            pending = self.state.need[agent_id].copy()
-            if float(np.sum(pending)) <= 0.0:
-                return
-            time_before = np.float32(self.state.time_remaining[agent_id])
-            timeout_before = int(self.state.timeout[agent_id])
-            time_spent = np.sum(pending / np.maximum(self.state.efficiency[agent_id], _EPSILON))
-            expected_time_remaining = np.float32(time_before - time_spent)
-            self._native_cycle.produce_need(agent_id=agent_id)
-            self.state.time_remaining[agent_id] = expected_time_remaining
-            if expected_time_remaining < 0.0:
-                self.state.timeout[agent_id] = timeout_before + 1
-            else:
-                self.state.timeout[agent_id] = timeout_before
-            self.engine._production_total += float(np.sum(pending))
+            produced_total = self._native_cycle.produce_need(agent_id=agent_id)
+            self.engine._production_total += produced_total
             return
         pending = self.state.need[agent_id].copy()
         if float(np.sum(pending)) <= 0.0:
             return
-        time_spent = np.sum(pending / np.maximum(self.state.efficiency[agent_id], _EPSILON))
-        self.state.time_remaining[agent_id] -= time_spent
-        self.state.recent_production[agent_id] += pending
-        self.state.produced_this_period[agent_id] += pending
-        self.engine._production_total += float(np.sum(pending))
-        self.state.need[agent_id] = 0.0
-        if self.state.time_remaining[agent_id] < 0.0:
+        required_time = float(np.sum(pending / np.maximum(self.state.efficiency[agent_id], _EPSILON)))
+        available_time = max(float(self.state.time_remaining[agent_id]), 0.0)
+        if required_time <= _EPSILON:
+            return
+
+        if required_time <= available_time + _EPSILON:
+            produced = pending
+            self.state.time_remaining[agent_id] = max(
+                float(self.state.time_remaining[agent_id]) - required_time,
+                0.0,
+            )
+            self.state.need[agent_id] = 0.0
+        elif available_time > _EPSILON:
+            scale = available_time / required_time
+            produced = pending * scale
+            self.state.time_remaining[agent_id] = 0.0
+            self.state.need[agent_id] = pending - produced
+            self.state.timeout[agent_id] += 1
+        else:
+            produced = np.zeros_like(pending)
+            self.state.time_remaining[agent_id] = 0.0
             self.state.timeout[agent_id] += 1
 
+        self.state.recent_production[agent_id] += produced
+        self.state.produced_this_period[agent_id] += produced
+        self.engine._production_total += float(np.sum(produced))
+
     def _surplus_production(self, agent_id: int) -> None:
+        if (
+            self._uses_experimental_phenomenon_exchange()
+            and self._native_cycle is not None
+            and self._native_cycle.supports_surplus_production
+        ):
+            produced_total = self._native_cycle.surplus_production(agent_id=agent_id)
+            self.engine._production_total += produced_total
+            self.engine._surplus_output_total += produced_total
+            return
+
         base_need_floor = float(self.state.base_need[agent_id, 0])
         while self.state.time_remaining[agent_id] >= 1.0:
             selected_good = -1
@@ -1718,6 +2333,9 @@ class LegacyCycleRunner:
             self.state.recent_sales[agent_id, good_id] *= self.config.activity_discount
             self.state.recent_purchases[agent_id, good_id] *= self.config.activity_discount
             self.state.recent_inventory_inflow[agent_id, good_id] *= self.config.activity_discount
+            self.state.recent_purchase_value[agent_id, good_id] *= self.config.activity_discount
+            self.state.recent_sales_value[agent_id, good_id] *= self.config.activity_discount
+            self.state.recent_inventory_inflow_value[agent_id, good_id] *= self.config.activity_discount
             self.state.purchase_times[agent_id, good_id] = 0
             self.state.sales_times[agent_id, good_id] = 0
             self.state.sum_period_purchase_value[agent_id, good_id] = 0.0
@@ -1743,11 +2361,18 @@ class LegacyCycleRunner:
                 elif self.state.purchase_times[agent_id, good_id] == 0 and self.state.purchase_price[agent_id, good_id] < production_cost:
                     self.state.purchase_price[agent_id, good_id] *= self.config.price_leap
             elif role == ROLE_RETAILER:
-                if (
-                    self.state.purchased_this_period[agent_id, good_id] < (self.state.sold_this_period[agent_id, good_id] + 1.0)
-                    or self.state.purchased_this_period[agent_id, good_id] < (stock_limit / max(float(self.config.history), 1.0))
-                ):
+                purchased = float(self.state.purchased_this_period[agent_id, good_id])
+                sold = float(self.state.sold_this_period[agent_id, good_id])
+                tolerance = max(float(self.config.min_trade_quantity), _EPSILON)
+                sell_through = sold > 0.0 and sold + tolerance >= purchased
+                has_room_for_hike = (
+                    float(self.state.purchase_price[agent_id, good_id]) * self.config.price_hike
+                    < float(self.state.sales_price[agent_id, good_id])
+                )
+                if sell_through and has_room_for_hike:
                     self.state.purchase_price[agent_id, good_id] *= self.config.price_hike
+                elif purchased > sold + tolerance:
+                    self.state.purchase_price[agent_id, good_id] *= self.config.price_reduction
         elif scarcity_case == 1:
             if role == ROLE_RETAILER:
                 if self.state.purchase_times[agent_id, good_id] > 1 and self.state.purchased_this_period[agent_id, good_id] > (stock_limit / 2.0):
@@ -1756,6 +2381,10 @@ class LegacyCycleRunner:
                     ) / float(self.state.purchase_times[agent_id, good_id] + self.config.history)
                 if self.state.purchase_price[agent_id, good_id] > self.state.sales_price[agent_id, good_id]:
                     self.state.purchase_price[agent_id, good_id] = self.config.price_reduction * self.state.sales_price[agent_id, good_id]
+                purchased = float(self.state.purchased_this_period[agent_id, good_id])
+                sold = float(self.state.sold_this_period[agent_id, good_id])
+                if purchased > sold + max(float(self.config.min_trade_quantity), _EPSILON):
+                    self.state.purchase_price[agent_id, good_id] *= self.config.price_reduction
             elif role == ROLE_PRODUCER:
                 if self.state.purchased_this_period[agent_id, good_id] > self.state.produced_this_period[agent_id, good_id]:
                     self.state.purchase_price[agent_id, good_id] *= self.config.price_reduction
@@ -1765,7 +2394,7 @@ class LegacyCycleRunner:
             elif role in {ROLE_RETAILER, ROLE_PRODUCER} and self.state.purchase_times[agent_id, good_id] > 0:
                 self.state.purchase_price[agent_id, good_id] *= self.config.price_reduction
 
-        self.state.purchase_price[agent_id, good_id] = max(self.state.purchase_price[agent_id, good_id], 0.05)
+        self._apply_price_lower_bounds(agent_id, good_id, production_cost=production_cost, role=role)
 
     def _adjust_sales_price(self, agent_id: int, good_id: int) -> None:
         production_cost = 1.0 / max(float(self.state.efficiency[agent_id, good_id]), _EPSILON)
@@ -1782,15 +2411,19 @@ class LegacyCycleRunner:
                 if self.state.sales_price[agent_id, good_id] < target:
                     self.state.sales_price[agent_id, good_id] = self.config.price_hike * target
             elif role == ROLE_RETAILER:
-                if self.state.sales_times[agent_id, good_id] > 1 and self.state.sold_this_period[agent_id, good_id] > (stock_limit / 2.0):
+                purchased = float(self.state.purchased_this_period[agent_id, good_id])
+                sold = float(self.state.sold_this_period[agent_id, good_id])
+                tolerance = max(float(self.config.min_trade_quantity), _EPSILON)
+                sell_through = sold > 0.0 and sold + tolerance >= purchased
+                if self.state.sales_times[agent_id, good_id] > 1 and sell_through:
                     blended_price = (
                         self.state.sum_period_sales_value[agent_id, good_id] + self.state.sales_price[agent_id, good_id]
                     ) / float(self.state.sales_times[agent_id, good_id] + 1)
                     self.state.sales_price[agent_id, good_id] = min(blended_price, self.config.price_leap * previous_sales_price)
                 if self.state.sales_price[agent_id, good_id] < self.state.purchase_price[agent_id, good_id]:
                     self.state.sales_price[agent_id, good_id] = self.state.purchase_price[agent_id, good_id]
-                if self.state.sales_times[agent_id, good_id] == 0:
-                    self.state.sales_price[agent_id, good_id] = self.config.price_hike * self.state.purchase_price[agent_id, good_id]
+                if self.state.sales_times[agent_id, good_id] == 0 and surplus > tolerance:
+                    self.state.sales_price[agent_id, good_id] *= self.config.price_reduction
             elif role == ROLE_PRODUCER and self.state.sales_price[agent_id, good_id] < production_cost:
                 self.state.sales_price[agent_id, good_id] = self.config.price_hike * production_cost
         elif scarcity_case == 1:
@@ -1806,8 +2439,8 @@ class LegacyCycleRunner:
                     self.state.sales_price[agent_id, good_id] *= self.config.price_reduction
             elif role == ROLE_PRODUCER:
                 if self.state.sold_this_period[agent_id, good_id] < elastic_need:
-                    self.state.sales_price[agent_id, good_id] *= self.config.price_reduction
-                if self.state.sales_price[agent_id, good_id] < production_cost:
+                    self.state.sales_price[agent_id, good_id] = production_cost
+                elif self.state.sales_price[agent_id, good_id] < production_cost:
                     self.state.sales_price[agent_id, good_id] = self.config.price_hike * production_cost
         else:
             if role == ROLE_CONSUMER:
@@ -1819,12 +2452,71 @@ class LegacyCycleRunner:
                     else:
                         self.state.sales_price[agent_id, good_id] *= self.config.price_reduction
             elif role == ROLE_PRODUCER:
-                if self.state.sales_price[agent_id, good_id] > production_cost:
-                    self.state.sales_price[agent_id, good_id] = self.config.price_hike * production_cost
                 if self.state.sold_this_period[agent_id, good_id] < elastic_need:
-                    self.state.sales_price[agent_id, good_id] = self.config.price_hike * production_cost
+                    if self.state.sold_this_period[agent_id, good_id] <= self.config.min_trade_quantity:
+                        if self.state.sales_price[agent_id, good_id] > production_cost:
+                            self.state.sales_price[agent_id, good_id] = production_cost
+                        else:
+                            self.state.sales_price[agent_id, good_id] *= self.config.price_reduction
+                    else:
+                        self.state.sales_price[agent_id, good_id] *= self.config.price_reduction
 
-        self.state.sales_price[agent_id, good_id] = max(self.state.sales_price[agent_id, good_id], 0.05)
+        self._apply_price_lower_bounds(agent_id, good_id, production_cost=production_cost, role=role)
+
+    def _minimum_price_floor(self, agent_id: int, good_id: int, *, production_cost: float) -> float:
+        floor_fraction = self.config.use_value_price_floor_fraction
+        floor = 0.0
+        if floor_fraction > 0.0:
+            needs_level = max(float(self.state.needs_level[agent_id]), 1.0)
+            visible_need = (
+                float(self.market.elastic_need[good_id])
+                * needs_level
+                * float(self.config.history)
+            )
+            visible_capacity = max(
+                visible_need,
+                float(self.state.stock_limit[agent_id, good_id]),
+                float(self.config.min_trade_quantity),
+            )
+            survival_fraction = max(
+                (1.0 - float(self.config.spoilage_rate)) ** max(int(self.config.history), 1),
+                _EPSILON,
+            )
+            spoilage_adjusted_capacity = visible_capacity / survival_fraction
+            stock = max(float(self.state.stock[agent_id, good_id]), 0.0)
+            inventory_factor = 1.0
+            if stock > spoilage_adjusted_capacity:
+                inventory_factor = spoilage_adjusted_capacity / max(stock, _EPSILON)
+            floor = max(0.0, production_cost * floor_fraction * inventory_factor)
+        if self.config.legacy_price_floor is not None:
+            floor = max(floor, float(self.config.legacy_price_floor))
+        return floor
+
+    def _apply_price_lower_bounds(self, agent_id: int, good_id: int, *, production_cost: float, role: int) -> None:
+        price_floor = self._minimum_price_floor(agent_id, good_id, production_cost=production_cost)
+        purchase_price = float(self.state.purchase_price[agent_id, good_id])
+        sales_price = float(self.state.sales_price[agent_id, good_id])
+
+        if price_floor > 0.0:
+            purchase_price = max(purchase_price, price_floor)
+            sales_floor = price_floor
+            if role == ROLE_RETAILER:
+                sales_floor = price_floor / max(float(self.config.price_reduction), _EPSILON)
+            sales_price = max(sales_price, sales_floor)
+
+        if role == ROLE_RETAILER and purchase_price >= sales_price:
+            discounted_purchase = float(self.config.price_reduction) * sales_price
+            if discounted_purchase >= price_floor:
+                purchase_price = discounted_purchase
+            else:
+                purchase_price = price_floor
+                sales_price = max(
+                    sales_price,
+                    price_floor / max(float(self.config.price_reduction), _EPSILON),
+                )
+
+        self.state.purchase_price[agent_id, good_id] = purchase_price
+        self.state.sales_price[agent_id, good_id] = sales_price
 
     def _calibrate_friend_transparency(self, agent_id: int) -> None:
         for friend_slot in range(self.config.acquaintances):

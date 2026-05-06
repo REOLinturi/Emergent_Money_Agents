@@ -11,5 +11,18 @@ build/
 .cargo/
 .rustup/
 runs/
+tmp/
+rustup-init.exe
+
+# Local one-off launchers produced during exploratory long runs. Keep
+# reproducible commands in documentation or source-level runners instead.
+continue_*.ps1
+continue_*.cmd
+continuous_exact*.cmd
+dashboard_*.cmd
+extend_*.cmd
+overnight_*.cmd
+overnight_*.py
+run_*.cmd
 
 native/legacy_search/target/

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
 
 from . import available_backend_names
+from .artifact_analysis import summarize_run_artifact
 from .config import SimulationConfig
 from .dashboard import serve_dashboard
 from .drift_compare import run_hybrid_consumption_comparison, run_hybrid_consumption_frontier_sweep
@@ -28,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-acquaintances", type=int, default=8)
     parser.add_argument("--demand-candidates", type=int, default=4)
     parser.add_argument("--supply-candidates", type=int, default=4)
+    parser.add_argument("--base-good-id-offset", type=int, default=0)
+    parser.add_argument("--base-good-id-stride", type=int, default=1)
     parser.add_argument("--cuda-friend-block", type=int, default=12)
     parser.add_argument("--cuda-goods-block", type=int, default=25)
     parser.add_argument("--experimental-hybrid-batches", type=int, default=0)
@@ -38,11 +43,62 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experimental-hybrid-allow-frontier-partners", action="store_true")
     parser.add_argument("--experimental-hybrid-preserve-proposer-order", action="store_true")
     parser.add_argument("--experimental-hybrid-rolling-frontier", action="store_true")
+    parser.add_argument(
+        "--experimental-parallel-phenomenon-exchange",
+        action="store_true",
+        help="Deprecated wave-based phenomenon path; use --experimental-session-clearing-phenomenon-exchange for new realism-path runs.",
+    )
+    parser.add_argument(
+        "--experimental-session-clearing-phenomenon-exchange",
+        action="store_true",
+        help="Preferred non-exact phenomenon path: local agents run revalidated barter sessions over known acquaintances.",
+    )
     parser.add_argument("--experimental-native-stage-math", action="store_true")
     parser.add_argument("--experimental-native-exchange-stage", action="store_true")
+    parser.add_argument("--experimental-agent-basket-planning", action="store_true")
+    parser.add_argument("--experimental-local-liquidity-stock-bias", type=float, default=0.0)
+    parser.add_argument("--experimental-local-liquidity-min-sales", type=float, default=2.0)
+    parser.add_argument(
+        "--experimental-aspirational-stock-target",
+        type=float,
+        default=0.0,
+        help=(
+            "Phenomenon-path surplus heuristic: let agents trade surplus goods for missing own-consumption "
+            "buffer up to this multiple of current need; 0 disables it."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-session-replan-passes",
+        type=int,
+        default=1,
+        help=(
+            "Phenomenon session path: number of local re-planning passes per agent encounter. "
+            "1 preserves the original fast session-clearing behavior."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-session-replan-after-trade",
+        action="store_true",
+        help=(
+            "Phenomenon session path: re-plan the local opportunity list after every committed "
+            "barter decision inside Rust."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-session-candidate-depth",
+        type=int,
+        default=1,
+        help=(
+            "Phenomenon session path: keep this many locally ranked alternatives per need-good "
+            "in the one-agent basket shopping list. 1 preserves current behavior."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=2009)
     parser.add_argument("--talent-probability", type=float, default=0.20)
+    parser.add_argument("--use-value-price-floor-fraction", type=float, default=1.0)
     parser.add_argument("--dashboard", action="store_true")
+    parser.add_argument("--dashboard-run-dir")
+    parser.add_argument("--summarize-run-dir")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8050)
     parser.add_argument("--batch-cycles", type=int, default=1)
@@ -59,11 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compare-frontier-sizes", nargs='+', type=int)
     parser.add_argument("--compare-native-sample-limit", type=int, default=256)
     parser.add_argument("--compare-native-benchmark-iterations", type=int, default=10)
+    parser.add_argument("--compare-max-seconds", type=float)
     parser.add_argument("--compare-output")
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--resume-from")
     parser.add_argument("--checkpoint-every", type=int, default=50)
     parser.add_argument("--sample-every", type=int, default=10)
+    parser.add_argument("--uncompressed-checkpoint", action="store_true")
     return parser
 
 
@@ -78,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
         active_acquaintances=args.active_acquaintances,
         demand_candidates=args.demand_candidates,
         supply_candidates=args.supply_candidates,
+        base_good_id_offset=args.base_good_id_offset,
+        base_good_id_stride=args.base_good_id_stride,
         cuda_friend_block=args.cuda_friend_block,
         cuda_goods_block=args.cuda_goods_block,
         experimental_hybrid_batches=args.experimental_hybrid_batches,
@@ -88,11 +148,27 @@ def main(argv: list[str] | None = None) -> int:
         experimental_hybrid_block_frontier_partners=not args.experimental_hybrid_allow_frontier_partners,
         experimental_hybrid_preserve_proposer_order=args.experimental_hybrid_preserve_proposer_order,
         experimental_hybrid_rolling_frontier=args.experimental_hybrid_rolling_frontier,
+        experimental_parallel_phenomenon_exchange=args.experimental_parallel_phenomenon_exchange,
+        experimental_session_clearing_phenomenon_exchange=args.experimental_session_clearing_phenomenon_exchange,
         experimental_native_stage_math=args.experimental_native_stage_math,
         experimental_native_exchange_stage=args.experimental_native_exchange_stage,
+        experimental_agent_basket_planning=args.experimental_agent_basket_planning,
+        experimental_local_liquidity_stock_bias=args.experimental_local_liquidity_stock_bias,
+        experimental_local_liquidity_min_sales=args.experimental_local_liquidity_min_sales,
+        experimental_aspirational_stock_target=args.experimental_aspirational_stock_target,
+        experimental_session_replan_passes=args.experimental_session_replan_passes,
+        experimental_session_replan_after_trade=args.experimental_session_replan_after_trade,
+        experimental_session_candidate_depth=args.experimental_session_candidate_depth,
         seed=args.seed,
         talent_probability=args.talent_probability,
+        use_value_price_floor_fraction=args.use_value_price_floor_fraction,
     )
+    if args.experimental_parallel_phenomenon_exchange:
+        print(
+            "warning: --experimental-parallel-phenomenon-exchange is the deprecated wave-based phenomenon path; "
+            "new phenomenon runs should use --experimental-session-clearing-phenomenon-exchange.",
+            file=sys.stderr,
+        )
 
     if args.dashboard:
         serve_dashboard(
@@ -101,7 +177,21 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             backend_name=args.backend,
             batch_cycles=args.batch_cycles,
+            artifact_dir=args.dashboard_run_dir,
         )
+        return 0
+
+    if args.summarize_run_dir:
+        summary = summarize_run_artifact(args.summarize_run_dir)
+        flags = summary['phenomenon_flags']
+        print(
+            f"artifact_summary run={Path(args.summarize_run_dir).resolve()} "
+            f"samples={summary['sample_count']} cycles={summary['first_cycle']}..{summary['last_cycle']} "
+            f"production_grew={flags['production_grew']} rare_money_emerged={flags['rare_money_emerged']} "
+            f"utility_peaked_before_end={flags['utility_peaked_before_end']} friction_rose={flags['friction_rose']} "
+            f"living_inequality_high={flags['living_standard_inequality_high']}"
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
     if args.compare_native_post_period:
@@ -220,12 +310,15 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             backend_name=args.backend,
             output_path=args.compare_output,
+            max_runtime_seconds=args.compare_max_seconds,
         )
         benchmark = summary['benchmark']
         mean_delta = summary['mean_final_delta']
         print(
             f"native_behavior seeds={len(summary['seeds'])} cycles={summary['cycles']} "
             f"matched_seeds={summary['matched_seed_count']} mismatches={summary['mismatch_count']} "
+            f"completed_seeds={summary.get('completed_seed_count', summary['matched_seed_count'])} "
+            f"stopped_early={summary.get('stopped_early', False)} "
             f"reference_seconds={benchmark['reference_seconds']:.6f} target_seconds={benchmark['target_seconds']:.6f} "
             f"speedup={benchmark['speedup_vs_reference']:.4f}"
         )
@@ -255,9 +348,22 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"native_cycle seeds={len(summary['seeds'])} cycles={summary['cycles']} "
             f"matched_seeds={summary['matched_seed_count']} mismatches={summary['mismatch_count']} "
+            f"matched_seeds_tolerant={summary.get('matched_seed_count_tolerant', summary['matched_seed_count'])} "
+            f"material_mismatches={summary.get('material_mismatch_count', summary['mismatch_count'])} "
+            f"tolerated_boundary_mismatches={summary.get('tolerated_mismatch_count', 0)} "
             f"python_seconds={benchmark['python_seconds']:.6f} native_seconds={benchmark['native_seconds']:.6f} "
             f"speedup={benchmark['speedup_vs_python']:.4f}"
         )
+        if summary.get('material_mismatch_examples'):
+            first = summary['material_mismatch_examples'][0]
+            example = first['field_mismatch_examples'][0] if first['field_mismatch_examples'] else None
+            detail = 'none'
+            if example is not None:
+                detail = example.get('field', str(example))
+            print(
+                f"first_material_mismatch seed={first['seed']} cycle={first['cycle']} field={detail} "
+                f"snapshot_deltas={first['snapshot_deltas']}"
+            )
         if summary['mismatch_examples']:
             first = summary['mismatch_examples'][0]
             example = first['field_mismatch_examples'][0] if first['field_mismatch_examples'] else None
@@ -389,13 +495,15 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_every=args.checkpoint_every,
             sample_every=args.sample_every,
             resume_from=args.resume_from,
+            compress_checkpoint=not args.uncompressed_checkpoint,
         )
         latest = summary["latest_market"]
         phenomena = summary["phenomena"]
         print(
             f"long_run start={summary['start_cycle']} end={summary['end_cycle']} "
             f"seconds={summary['runtime_seconds']:.2f} utility={latest['utility_proxy_total']:.4f} "
-            f"production={latest['production_total']:.2f} rare_money={latest['rare_goods_monetary_share']:.4f}"
+            f"production={latest['production_total']:.2f} rare_money={latest['rare_goods_monetary_share']:.4f} "
+            f"value_rare_money={latest.get('value_weighted_rare_goods_monetary_share', 0.0):.4f}"
         )
         print(
             f"analysis production_trend={phenomena['production_trend']:.4f} utility_trend={phenomena['utility_trend']:.4f} "
@@ -413,7 +521,8 @@ def main(argv: list[str] | None = None) -> int:
             f"utility={snapshot.utility_proxy_total:.2f} production={snapshot.production_total:.2f} "
             f"stock={snapshot.stock_total:.2f} proposed_trades={snapshot.proposed_trade_count} "
             f"accepted_trades={snapshot.accepted_trade_count} accepted_volume={snapshot.accepted_trade_volume:.2f} "
-            f"rare_money={snapshot.rare_goods_monetary_share:.4f}"
+            f"rare_money={snapshot.rare_goods_monetary_share:.4f} "
+            f"value_rare_money={snapshot.value_weighted_rare_goods_monetary_share:.4f}"
         )
 
     if args.analysis:
@@ -427,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if goods:
             top = ", ".join(
-                f"g{item.good_id}:score={item.monetary_score:.3f}:rare={int(item.is_rare)}" for item in goods
+                f"g{item.good_id}:score={item.monetary_score:.3f}:value_score={item.value_weighted_monetary_score:.3f}:rare={int(item.is_rare)}" for item in goods
             )
             print(f"top_monetary_goods={top}")
 
