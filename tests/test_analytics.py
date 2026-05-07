@@ -95,5 +95,47 @@ def test_exchange_media_score_requires_relative_tce_and_local_circulation() -> N
     assert goods[0].exchange_media_score > 0.0
     assert goods[0].relative_tce_loss > goods[1].relative_tce_loss
     assert goods[0].network_circulation_breadth > goods[1].network_circulation_breadth
+    assert goods[0].excess_stock_breadth > 0.0
+    assert goods[0].round_trip_breadth > 0.0
+    assert goods[0].consumer_flow_share == 0.0
     assert goods[1].monetary_score > 0.0
     assert goods[1].exchange_media_score == 0.0
+
+
+def test_exchange_media_score_does_not_require_retailer_role() -> None:
+    config = SimulationConfig(
+        population=4,
+        goods=1,
+        acquaintances=2,
+        active_acquaintances=2,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+
+    state.role[...] = ROLE_CONSUMER
+    state.purchase_price[...] = 1.0
+    state.sales_price[...] = 1.0
+    state.stock[...] = 100.0
+    state.recent_purchases[...] = 10.0
+    state.recent_sales[...] = 8.0
+    state.recent_inventory_inflow[...] = state.recent_purchases
+    state.recent_purchase_value[...] = 0.0
+    state.recent_sales_value[...] = 0.0
+    state.recent_inventory_inflow_value[...] = 0.0
+    state.friend_purchased[...] = 0.0
+    state.friend_sold[...] = 0.0
+    state.friend_id[...] = 0
+    state.friend_purchased[:, 0, 0] = 1.0
+    state.friend_sold[:, 1, 0] = 1.0
+    state.market.elastic_need[...] = 1.0
+    state.market.periodic_tce_cost[...] = 20.0
+
+    goods = compute_good_snapshots(state=state, backend=engine.backend, limit=None)
+
+    assert goods[0].monetary_score == 0.0
+    assert goods[0].value_weighted_monetary_score == 0.0
+    assert goods[0].exchange_media_score > 0.0
+    assert goods[0].consumer_flow_share == 1.0
+    assert goods[0].round_trip_turnover_share > 0.0

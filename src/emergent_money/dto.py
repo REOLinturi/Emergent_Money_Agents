@@ -225,6 +225,12 @@ class GoodSnapshot:
     relative_trade_flow: float = 0.0
     relative_stock: float = 0.0
     network_circulation_breadth: float = 0.0
+    excess_stock_breadth: float = 0.0
+    excess_stock_ratio: float = 0.0
+    round_trip_breadth: float = 0.0
+    round_trip_turnover_share: float = 0.0
+    consumer_flow_share: float = 0.0
+    retailer_stock_share: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)

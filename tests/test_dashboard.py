@@ -73,6 +73,9 @@ def test_artifact_dashboard_controller_reads_long_run_artifacts(tmp_path) -> Non
     assert 'value_weighted_monetary_score' in goods[0]
     assert 'exchange_media_score' in goods[0]
     assert 'relative_tce_loss' in goods[0]
+    assert 'excess_stock_breadth' in goods[0]
+    assert 'round_trip_breadth' in goods[0]
+    assert 'consumer_flow_share' in goods[0]
     assert phenomena['cycles_observed'] == 3
     assert 0.0 <= phenomena['value_weighted_rare_goods_monetary_share'] <= 1.0
     assert 0.0 <= phenomena['rare_goods_exchange_media_share'] <= 1.0
@@ -117,6 +120,9 @@ def test_dashboard_page_marks_exact_legacy_candidate_controls_as_scaffold_only()
     assert 'Exchange-media rare' in html
     assert 'Exchange-media candidates' in html
     assert 'sort_by=exchange_media_score' in html
+    assert 'Excess holders' in html
+    assert 'Round trips' in html
+    assert 'Cons flow' in html
     assert 'Expectation shortfall' in html
     assert 'Aspirational balance' in html
     assert 'Smith need cost' in html

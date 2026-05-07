@@ -730,12 +730,7 @@ class LegacyCycleRunner:
 
     def _prepare_agent_for_consumption(self, agent_id: int) -> None:
         if self._uses_experimental_native_stage_math() and self._native_cycle.supports_prepare_agent_for_consumption:
-            stock_before = self.state.stock[agent_id].copy()
-            self._native_cycle.prepare_agent_for_consumption(agent_id=agent_id)
-            cycle_need = self._baseline_cycle_need(agent_id)
-            consumed = np.minimum(stock_before, cycle_need)
-            stock_consumed_total = float(np.sum(consumed))
-            cycle_need_total = float(np.sum(cycle_need))
+            cycle_need_total, stock_consumed_total = self._native_cycle.prepare_agent_for_consumption(agent_id=agent_id)
             self.engine._cycle_need_total += cycle_need_total
             self.engine._stock_consumption_total += stock_consumed_total
             return
@@ -827,7 +822,7 @@ class LegacyCycleRunner:
             self.state.needs_level[agent_id] *= self.config.max_needs_reduction
         elif debt > ((1.0 - self.config.max_needs_increase) * self.period_length) and stock_level > self.config.max_needs_increase:
             self.state.needs_level[agent_id] *= self.config.max_needs_increase
-        elif stock_level > self.config.small_needs_increase:
+        elif stock_level > self.config.lifestyle_promotion_threshold:
             self.state.needs_level[agent_id] *= self.config.small_needs_increase
         else:
             self.state.needs_level[agent_id] *= self.config.small_needs_reduction
@@ -1117,7 +1112,16 @@ class LegacyCycleRunner:
 
                 if result.executed:
                     executed_any = True
-                if not result.executed or result.exhausted_gift:
+                offer_exhausted = (
+                    self.state.stock[agent_id, offer_good]
+                    <= self.market.elastic_need[offer_good] * self.state.needs_level[agent_id] + 1.0
+                )
+                if offer_exhausted and not self.config.experimental_session_pairwise_offer_exhaustion:
+                    changed_forbidden = bool(
+                        changed_forbidden or not np.all(forbidden_offer_by_need[:, offer_good])
+                    )
+                    forbidden_offer_by_need[:, offer_good] = True
+                elif not result.executed or result.exhausted_gift:
                     if not forbidden_offer_by_need[need_good, offer_good]:
                         forbidden_offer_by_need[need_good, offer_good] = True
                         changed_forbidden = True

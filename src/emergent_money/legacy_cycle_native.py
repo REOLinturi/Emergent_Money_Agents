@@ -92,6 +92,7 @@ class NativeLegacyCycleBackend:
             max_needs_increase=config.max_needs_increase,
             max_needs_reduction=config.max_needs_reduction,
             small_needs_increase=config.small_needs_increase,
+            lifestyle_promotion_threshold=config.lifestyle_promotion_threshold,
             small_needs_reduction=config.small_needs_reduction,
             base_need=state.base_need,
             need=state.need,
@@ -185,6 +186,7 @@ class NativeLegacyCycleBackend:
             local_liquidity_stock_bias=config.experimental_local_liquidity_stock_bias,
             local_liquidity_min_sales=config.experimental_local_liquidity_min_sales,
             aspirational_stock_target=config.experimental_aspirational_stock_target,
+            disable_offer_prefilter=config.experimental_session_disable_offer_prefilter,
             market_elastic_need=market.elastic_need,
             forbidden_offer_by_need=forbidden_offer_by_need,
             stock=state.stock,
@@ -526,6 +528,8 @@ def native_exact_cycle_available() -> bool:
 
 def can_use_native_legacy_cycle(engine) -> bool:
     config = engine.config
+    if config.experimental_disable_native_cycle_bridge:
+        return False
     if hasattr(engine, '_exchange_stage_trace_log'):
         return False
     if (

@@ -518,6 +518,7 @@ fn search_best_exchange_all_offer_goods_internal(
     need_good: usize,
     initial_transparency: f32,
     forbidden_offer_by_need: &[bool],
+    available_offer_goods: &[usize],
     friend_ids: ArrayView1<'_, i32>,
     reciprocal_slots: ArrayView1<'_, i32>,
     my_stock: ArrayView1<'_, f32>,
@@ -542,13 +543,16 @@ fn search_best_exchange_all_offer_goods_internal(
 
     let my_need_purchase_price = my_purchase_price[need_good];
     let my_need_is_producer = my_role[need_good] == ROLE_PRODUCER;
-    let cell_count = friend_ids.len().saturating_mul(goods);
+    let cell_count = friend_ids
+        .len()
+        .saturating_mul(available_offer_goods.len());
     if allow_parallel && cell_count >= PARALLEL_SEARCH_MIN_CELLS {
         return search_best_exchange_all_offer_goods_internal_parallel(
             goods,
             need_good,
             initial_transparency,
             forbidden_offer_by_need,
+            available_offer_goods,
             friend_ids,
             reciprocal_slots,
             my_stock,
@@ -581,8 +585,12 @@ fn search_best_exchange_all_offer_goods_internal(
             continue;
         }
 
-        for offer_good in 0..goods {
-            if offer_good == need_good || forbidden_offer_by_need[(need_good * goods) + offer_good] {
+        for &offer_good in available_offer_goods {
+            if offer_good >= goods {
+                continue;
+            }
+            if offer_good == need_good || forbidden_offer_by_need[(need_good * goods) + offer_good]
+            {
                 continue;
             }
             if my_stock[offer_good] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
@@ -651,6 +659,7 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
     need_good: usize,
     initial_transparency: f32,
     forbidden_offer_by_need: &[bool],
+    available_offer_goods: &[usize],
     friend_ids: ArrayView1<'_, i32>,
     reciprocal_slots: ArrayView1<'_, i32>,
     my_stock: ArrayView1<'_, f32>,
@@ -683,8 +692,13 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
             }
 
             let mut best_for_friend: Option<(usize, SearchCandidate)> = None;
-            for offer_good in 0..goods {
-                if offer_good == need_good || forbidden_offer_by_need[(need_good * goods) + offer_good] {
+            for &offer_good in available_offer_goods {
+                if offer_good >= goods {
+                    continue;
+                }
+                if offer_good == need_good
+                    || forbidden_offer_by_need[(need_good * goods) + offer_good]
+                {
                     continue;
                 }
                 if my_stock[offer_good] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
@@ -794,6 +808,7 @@ fn plan_exchange_basket(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    disable_offer_prefilter: bool,
     market_elastic_need: PyReadonlyArray1<'_, f32>,
     forbidden_offer_by_need: PyReadonlyArray2<'_, bool>,
     stock: PyReadonlyArray2<'_, f32>,
@@ -869,13 +884,25 @@ fn plan_exchange_basket(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
+    let available_offer_goods =
+        collect_available_offer_goods(
+            agent_id,
+            goods,
+            elastic_need,
+            stock,
+            needs_level,
+            disable_offer_prefilter,
+        );
+    if available_offer_goods.is_empty() {
+        return Ok(Vec::new());
+    }
     let reciprocal_slots_view = ArrayView1::from(&reciprocal_slots[..]);
 
     let forbidden_offer_slice = forbidden_offer_by_need.as_slice_memory_order();
-    let basket_cell_count = goods
-        .saturating_mul(goods)
-        .saturating_mul(acquaintances);
-    let mut candidates: Vec<BasketCandidate> = if let Some(forbidden_offer_slice) = forbidden_offer_slice {
+    let basket_cell_count = goods.saturating_mul(goods).saturating_mul(acquaintances);
+    let mut candidates: Vec<BasketCandidate> = if let Some(forbidden_offer_slice) =
+        forbidden_offer_slice
+    {
         if basket_cell_count >= PARALLEL_BASKET_MIN_CELLS {
             (0..goods)
                 .into_par_iter()
@@ -892,6 +919,7 @@ fn plan_exchange_basket(
                         local_liquidity_min_sales,
                         aspirational_stock_target,
                         forbidden_offer_slice,
+                        &available_offer_goods,
                         elastic_need,
                         stock,
                         role,
@@ -934,6 +962,7 @@ fn plan_exchange_basket(
                         local_liquidity_min_sales,
                         aspirational_stock_target,
                         forbidden_offer_slice,
+                        &available_offer_goods,
                         elastic_need,
                         stock,
                         role,
@@ -990,7 +1019,8 @@ fn plan_exchange_basket(
                     return None;
                 }
 
-                let mut candidate_offer_goods: Vec<i32> = Vec::with_capacity(goods.saturating_sub(1));
+                let mut candidate_offer_goods: Vec<i32> =
+                    Vec::with_capacity(goods.saturating_sub(1));
                 for offer_good in 0..goods {
                     if offer_good == need_good || forbidden_offer_by_need[[need_good, offer_good]] {
                         continue;
@@ -1108,7 +1138,11 @@ fn plan_agent_parallel_phenomenon_candidates(
             continue;
         }
         let friend_idx = fid as usize;
-        if blocked_partner_mask.get(friend_idx).copied().unwrap_or(false) {
+        if blocked_partner_mask
+            .get(friend_idx)
+            .copied()
+            .unwrap_or(false)
+        {
             continue;
         }
         has_known_partner = true;
@@ -1128,6 +1162,11 @@ fn plan_agent_parallel_phenomenon_candidates(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
+    let available_offer_goods =
+        collect_available_offer_goods(agent_id, goods, elastic_need, stock, needs_level, false);
+    if available_offer_goods.is_empty() {
+        return Vec::new();
+    }
     let mut forbidden_offer_by_need = vec![false; goods.saturating_mul(goods)];
     let mut candidates: Vec<ParallelPhenomenonCandidate> = Vec::new();
 
@@ -1171,6 +1210,7 @@ fn plan_agent_parallel_phenomenon_candidates(
                 local_liquidity_min_sales,
                 aspirational_stock_target,
                 &forbidden_offer_by_need,
+                &available_offer_goods,
                 elastic_need,
                 stock,
                 role,
@@ -1308,7 +1348,8 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
     reciprocal_slots_view: ArrayView1<'_, i32>,
     one_candidate_per_agent: bool,
 ) -> Vec<ParallelPhenomenonCandidate> {
-    if agent_id >= stock.nrows() || goods > stock.ncols() || acquaintances > agent_friend_ids.len() {
+    if agent_id >= stock.nrows() || goods > stock.ncols() || acquaintances > agent_friend_ids.len()
+    {
         return Vec::new();
     }
     if !agent_friend_ids.iter().any(|friend_id| *friend_id >= 0) {
@@ -1321,6 +1362,11 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
+    let available_offer_goods =
+        collect_available_offer_goods(agent_id, goods, elastic_need, stock, needs_level, false);
+    if available_offer_goods.is_empty() {
+        return Vec::new();
+    }
     let mut forbidden_offer_by_need = vec![false; goods.saturating_mul(goods)];
     let mut candidates: Vec<ParallelPhenomenonCandidate> = Vec::new();
 
@@ -1364,6 +1410,7 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
                 local_liquidity_min_sales,
                 aspirational_stock_target,
                 &forbidden_offer_by_need,
+                &available_offer_goods,
                 elastic_need,
                 stock,
                 role,
@@ -2269,6 +2316,602 @@ struct NativeStageTotals {
     leisure_extra_need_total: f64,
 }
 
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
+}
+
+fn sample_new_friend_internal(
+    agent_id: usize,
+    population: usize,
+    acquaintances: usize,
+    seed: u64,
+    cycle: usize,
+    salt: u64,
+    friend_id: ArrayView2<'_, i32>,
+) -> i32 {
+    if population <= 1 {
+        return -1;
+    }
+    let mut rng_state = seed
+        .wrapping_add(((cycle + 1) as u64).wrapping_mul(1_000_003))
+        .wrapping_add((agent_id as u64).wrapping_mul(97))
+        .wrapping_add(salt);
+    let draws = acquaintances.saturating_mul(2).max(8);
+    for _ in 0..draws {
+        let candidate = (splitmix64_next(&mut rng_state) % (population as u64)) as usize;
+        if candidate != agent_id
+            && find_friend_slot_scan_internal(friend_id, agent_id, candidate as i32) < 0
+        {
+            return candidate as i32;
+        }
+    }
+    for candidate in 0..population {
+        if candidate != agent_id
+            && find_friend_slot_scan_internal(friend_id, agent_id, candidate as i32) < 0
+        {
+            return candidate as i32;
+        }
+    }
+    -1
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_random_friend_internal(
+    agent_id: usize,
+    population: usize,
+    acquaintances: usize,
+    goods: usize,
+    seed: u64,
+    cycle: usize,
+    initial_transparency: f32,
+    initial_transactions: f32,
+    friend_id: &mut ArrayViewMut2<'_, i32>,
+    friend_activity: &mut ArrayViewMut2<'_, f32>,
+    friend_purchased: &mut ArrayViewMut3<'_, f32>,
+    friend_sold: &mut ArrayViewMut3<'_, f32>,
+    transparency: &mut ArrayViewMut3<'_, f32>,
+) {
+    let candidate = sample_new_friend_internal(
+        agent_id,
+        population,
+        acquaintances,
+        seed,
+        cycle,
+        17,
+        friend_id.view(),
+    );
+    if candidate < 0 {
+        return;
+    }
+    ensure_friend_link_array_only(
+        agent_id,
+        candidate as usize,
+        acquaintances,
+        goods,
+        initial_transparency,
+        initial_transactions,
+        friend_id,
+        friend_activity,
+        friend_purchased,
+        friend_sold,
+        transparency,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn surplus_production_internal(
+    agent_id: usize,
+    goods: usize,
+    switch_time: f32,
+    stock_limit_multiplier: f32,
+    price_hike: f32,
+    base_need: ArrayView2<'_, f32>,
+    mut stock: ArrayViewMut2<'_, f32>,
+    stock_limit: ArrayView2<'_, f32>,
+    talent_mask: ArrayView2<'_, f32>,
+    purchase_times: ArrayView2<'_, i32>,
+    efficiency: ArrayView2<'_, f32>,
+    sales_price: ArrayView2<'_, f32>,
+    mut time_remaining: ArrayViewMut1<'_, f32>,
+    mut recent_production: ArrayViewMut2<'_, f32>,
+    mut produced_this_period: ArrayViewMut2<'_, f32>,
+) -> f64 {
+    let base_need_floor = base_need[[agent_id, 0]];
+    let mut produced_total = 0.0_f64;
+    while time_remaining[agent_id] >= 1.0 {
+        let mut selected_good: Option<usize> = None;
+        let mut selected_limit = 0.0_f32;
+        let mut best_index = 0.0_f32;
+        for good_id in 0..goods {
+            if talent_mask[[agent_id, good_id]] <= 0.0 {
+                continue;
+            }
+            let production_limit = stock_limit[[agent_id, good_id]] - stock[[agent_id, good_id]];
+            if production_limit <= 1.0 {
+                continue;
+            }
+            let production_profitable = (purchase_times[[agent_id, good_id]] == 0
+                && stock[[agent_id, good_id]] > (stock_limit_multiplier * base_need_floor))
+                || ((1.0 / efficiency[[agent_id, good_id]].max(EPSILON))
+                    <= (price_hike * sales_price[[agent_id, good_id]]));
+            if !production_profitable {
+                continue;
+            }
+            let production_index = efficiency[[agent_id, good_id]]
+                - (1.0 / sales_price[[agent_id, good_id]].max(EPSILON));
+            if production_index >= best_index {
+                best_index = production_index;
+                selected_good = Some(good_id);
+                selected_limit = production_limit;
+            }
+        }
+
+        let Some(selected_good) = selected_good else {
+            break;
+        };
+
+        let max_production = efficiency[[agent_id, selected_good]] * time_remaining[agent_id];
+        let produced = max_production.min(selected_limit);
+        if produced <= 0.0 {
+            break;
+        }
+        stock[[agent_id, selected_good]] += produced;
+        produced_this_period[[agent_id, selected_good]] += produced;
+        recent_production[[agent_id, selected_good]] += produced;
+        produced_total += produced as f64;
+
+        if max_production < selected_limit {
+            time_remaining[agent_id] = 0.0;
+        } else {
+            time_remaining[agent_id] -=
+                switch_time + (produced / efficiency[[agent_id, selected_good]].max(EPSILON));
+        }
+    }
+    produced_total
+}
+
+#[allow(clippy::too_many_arguments)]
+fn leisure_production_internal(
+    agent_id: usize,
+    goods: usize,
+    mut stock: ArrayViewMut2<'_, f32>,
+    stock_limit: ArrayView2<'_, f32>,
+    talent_mask: ArrayView2<'_, f32>,
+    purchase_price: ArrayView2<'_, f32>,
+    mut time_remaining: ArrayViewMut1<'_, f32>,
+    mut recent_production: ArrayViewMut2<'_, f32>,
+    mut produced_this_period: ArrayViewMut2<'_, f32>,
+) -> f64 {
+    let mut produced_total = 0.0_f64;
+    while time_remaining[agent_id] >= 1.0 {
+        let mut selected_good: Option<usize> = None;
+        let mut selected_limit = 0.0_f32;
+        let mut best_index = 0.0_f32;
+        for good_id in 0..goods {
+            if talent_mask[[agent_id, good_id]] > 0.0 {
+                continue;
+            }
+            let production_limit = stock_limit[[agent_id, good_id]] - stock[[agent_id, good_id]];
+            if production_limit > 1.0 && purchase_price[[agent_id, good_id]] >= best_index {
+                best_index = purchase_price[[agent_id, good_id]];
+                selected_good = Some(good_id);
+                selected_limit = production_limit;
+            }
+        }
+        let Some(selected_good) = selected_good else {
+            break;
+        };
+
+        let produced = time_remaining[agent_id].min(selected_limit);
+        if produced <= 0.0 {
+            break;
+        }
+        stock[[agent_id, selected_good]] += produced;
+        produced_this_period[[agent_id, selected_good]] += produced;
+        recent_production[[agent_id, selected_good]] += produced;
+        produced_total += produced as f64;
+        time_remaining[agent_id] -= produced;
+    }
+    produced_total
+}
+
+#[allow(clippy::too_many_arguments)]
+fn end_agent_period_internal(
+    agent_id: usize,
+    cycle: usize,
+    goods: usize,
+    acquaintances: usize,
+    history: i32,
+    initial_efficiency: f64,
+    gifted_efficiency_floor: f64,
+    initial_transparency: f64,
+    stock_limit_multiplier: f64,
+    activity_discount: f64,
+    spoilage_rate: f64,
+    stock_spoil_threshold: f64,
+    price_reduction: f64,
+    price_hike: f64,
+    price_leap: f64,
+    min_trade_quantity: f64,
+    max_stocklimit_decrease: f64,
+    max_stocklimit_increase: f64,
+    max_efficiency_downgrade: f64,
+    max_efficiency_upgrade: f64,
+    base_need: ArrayView2<'_, f32>,
+    mut stock: ArrayViewMut2<'_, f32>,
+    mut stock_limit: ArrayViewMut2<'_, f32>,
+    mut previous_stock_limit: ArrayViewMut2<'_, f32>,
+    mut efficiency: ArrayViewMut2<'_, f32>,
+    mut learned_efficiency: ArrayViewMut2<'_, f32>,
+    mut recent_production: ArrayViewMut2<'_, f32>,
+    mut recent_sales: ArrayViewMut2<'_, f32>,
+    mut recent_purchases: ArrayViewMut2<'_, f32>,
+    mut recent_inventory_inflow: ArrayViewMut2<'_, f32>,
+    mut recent_purchase_value: ArrayViewMut2<'_, f32>,
+    mut recent_sales_value: ArrayViewMut2<'_, f32>,
+    mut recent_inventory_inflow_value: ArrayViewMut2<'_, f32>,
+    produced_this_period: ArrayViewMut2<'_, f32>,
+    mut produced_last_period: ArrayViewMut2<'_, f32>,
+    sold_this_period: ArrayViewMut2<'_, f32>,
+    mut sold_last_period: ArrayViewMut2<'_, f32>,
+    purchased_this_period: ArrayViewMut2<'_, f32>,
+    mut purchased_last_period: ArrayViewMut2<'_, f32>,
+    mut purchase_times: ArrayViewMut2<'_, i32>,
+    mut sales_times: ArrayViewMut2<'_, i32>,
+    mut sum_period_purchase_value: ArrayViewMut2<'_, f32>,
+    mut sum_period_sales_value: ArrayViewMut2<'_, f32>,
+    mut spoilage: ArrayViewMut2<'_, f32>,
+    mut periodic_spoilage: ArrayViewMut1<'_, f32>,
+    talent_mask: ArrayView2<'_, f32>,
+    mut role: ArrayViewMut2<'_, i32>,
+    mut purchase_price: ArrayViewMut2<'_, f32>,
+    mut sales_price: ArrayViewMut2<'_, f32>,
+    mut friend_activity: ArrayViewMut2<'_, f32>,
+    friend_purchased: ArrayView3<'_, f32>,
+    mut transparency: ArrayViewMut3<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    market_elastic_need: ArrayView1<'_, f32>,
+    mut market_periodic_spoilage: ArrayViewMut1<'_, f32>,
+    use_value_price_floor_fraction: f64,
+    legacy_price_floor: Option<f64>,
+) {
+    let epsilon64 = EPSILON as f64;
+    periodic_spoilage[agent_id] = 0.0;
+
+    for good_id in 0..goods {
+        let elastic_component = market_elastic_need[good_id] * needs_level[agent_id];
+        let target_stock_limit = (stock_limit_multiplier * (elastic_component as f64))
+            + (recent_sales[[agent_id, good_id]] as f64);
+        let lower_limit =
+            max_stocklimit_decrease * (previous_stock_limit[[agent_id, good_id]] as f64);
+        let upper_limit =
+            max_stocklimit_increase * (previous_stock_limit[[agent_id, good_id]] as f64);
+        let updated_stock_limit = target_stock_limit.clamp(lower_limit, upper_limit) as f32;
+        stock_limit[[agent_id, good_id]] = updated_stock_limit;
+        previous_stock_limit[[agent_id, good_id]] = updated_stock_limit;
+
+        if talent_mask[[agent_id, good_id]] > 0.0 {
+            let previous_efficiency = efficiency[[agent_id, good_id]] as f64;
+            let mut learned = (((recent_production[[agent_id, good_id]] as f64) + 1.0)
+                / (((history as f64) * (base_need[[agent_id, good_id]] as f64)).max(epsilon64)))
+            .max(epsilon64)
+            .sqrt();
+            learned = learned.max(gifted_efficiency_floor);
+            learned = learned.clamp(
+                previous_efficiency * max_efficiency_downgrade,
+                previous_efficiency * max_efficiency_upgrade,
+            );
+            learned = learned.max(gifted_efficiency_floor);
+            learned_efficiency[[agent_id, good_id]] = learned as f32;
+            efficiency[[agent_id, good_id]] = learned as f32;
+        } else {
+            learned_efficiency[[agent_id, good_id]] = initial_efficiency as f32;
+            efficiency[[agent_id, good_id]] = initial_efficiency as f32;
+        }
+
+        let recent_produced = recent_production[[agent_id, good_id]] as f64;
+        let recent_purchased_value = recent_purchases[[agent_id, good_id]] as f64;
+        let recent_sold = recent_sales[[agent_id, good_id]] as f64;
+        let mut role_value = ROLE_CONSUMER;
+        if recent_produced > recent_purchased_value
+            && recent_sold > ((recent_produced + recent_purchased_value) / 2.0)
+        {
+            role_value = ROLE_PRODUCER;
+        } else if recent_produced < recent_purchased_value
+            && recent_sold > ((recent_produced + recent_purchased_value) / 2.0)
+        {
+            role_value = ROLE_RETAILER;
+        }
+        role[[agent_id, good_id]] = role_value;
+
+        let production_cost = 1.0_f64 / (efficiency[[agent_id, good_id]] as f64).max(epsilon64);
+        let surplus = stock[[agent_id, good_id]] as f64;
+        let elastic_need = market_elastic_need[good_id] as f64;
+        let stock_limit_value = stock_limit[[agent_id, good_id]] as f64;
+        let mut price_floor = 0.0_f64;
+        if use_value_price_floor_fraction > 0.0 {
+            let needs_level_value = (needs_level[agent_id] as f64).max(1.0);
+            let visible_need = elastic_need * needs_level_value * (history as f64);
+            let visible_capacity = visible_need
+                .max(stock_limit_value)
+                .max(min_trade_quantity.max(epsilon64));
+            let survival_fraction = (1.0 - spoilage_rate).powi(history.max(1)).max(epsilon64);
+            let spoilage_adjusted_capacity = visible_capacity / survival_fraction;
+            let stock_value = surplus.max(0.0);
+            let inventory_factor = if stock_value > spoilage_adjusted_capacity {
+                spoilage_adjusted_capacity / stock_value.max(epsilon64)
+            } else {
+                1.0
+            };
+            price_floor =
+                (production_cost * use_value_price_floor_fraction * inventory_factor).max(0.0);
+        }
+        if let Some(floor) = legacy_price_floor {
+            price_floor = price_floor.max(floor);
+        }
+        let scarcity_case = i32::from(surplus > elastic_need)
+            + i32::from(surplus > (stock_limit_value + elastic_need));
+
+        let mut purchase_price_value = purchase_price[[agent_id, good_id]] as f64;
+        if scarcity_case == 0 {
+            if role_value == ROLE_CONSUMER {
+                if recent_purchases[[agent_id, good_id]]
+                    < (recent_production[[agent_id, good_id]] + 1.0)
+                {
+                    purchase_price_value = production_cost;
+                } else if purchase_times[[agent_id, good_id]] == 0
+                    && purchase_price[[agent_id, good_id]] < production_cost as f32
+                {
+                    purchase_price_value =
+                        mul_assign_like_numpy_float32(purchase_price_value, price_leap);
+                }
+            } else if role_value == ROLE_RETAILER {
+                let purchased = purchased_this_period[[agent_id, good_id]] as f64;
+                let sold = sold_this_period[[agent_id, good_id]] as f64;
+                let tolerance = min_trade_quantity.max(EPSILON as f64);
+                let sell_through = sold > 0.0 && sold + tolerance >= purchased;
+                let has_room_for_hike = purchase_price_value * (price_hike as f64)
+                    < sales_price[[agent_id, good_id]] as f64;
+                if sell_through && has_room_for_hike {
+                    purchase_price_value =
+                        mul_assign_like_numpy_float32(purchase_price_value, price_hike);
+                } else if purchased > sold + tolerance {
+                    purchase_price_value =
+                        mul_assign_like_numpy_float32(purchase_price_value, price_reduction);
+                }
+            }
+        } else if scarcity_case == 1 {
+            if role_value == ROLE_RETAILER {
+                if purchase_times[[agent_id, good_id]] > 1
+                    && purchased_this_period[[agent_id, good_id]]
+                        > (stock_limit[[agent_id, good_id]] / 2.0)
+                {
+                    purchase_price_value = ((sum_period_purchase_value[[agent_id, good_id]]
+                        + ((history as f32) * purchase_price[[agent_id, good_id]]))
+                        / ((purchase_times[[agent_id, good_id]] + history) as f32))
+                        as f64;
+                }
+                if purchase_price_value > sales_price[[agent_id, good_id]] as f64 {
+                    purchase_price_value = mul_assign_like_numpy_float32(
+                        sales_price[[agent_id, good_id]] as f64,
+                        price_reduction,
+                    );
+                }
+                let purchased = purchased_this_period[[agent_id, good_id]] as f64;
+                let sold = sold_this_period[[agent_id, good_id]] as f64;
+                if purchased > sold + min_trade_quantity.max(EPSILON as f64) {
+                    purchase_price_value =
+                        mul_assign_like_numpy_float32(purchase_price_value, price_reduction);
+                }
+            } else if role_value == ROLE_PRODUCER
+                && purchased_this_period[[agent_id, good_id]]
+                    > produced_this_period[[agent_id, good_id]]
+            {
+                purchase_price_value =
+                    mul_assign_like_numpy_float32(purchase_price_value, price_reduction);
+            }
+        } else if role_value == ROLE_CONSUMER {
+            purchase_price_value =
+                mul_assign_like_numpy_float32(purchase_price_value, price_reduction);
+        } else if (role_value == ROLE_RETAILER || role_value == ROLE_PRODUCER)
+            && purchase_times[[agent_id, good_id]] > 0
+        {
+            purchase_price_value =
+                mul_assign_like_numpy_float32(purchase_price_value, price_reduction);
+        }
+        if price_floor > 0.0 {
+            purchase_price_value = purchase_price_value.max(price_floor);
+            let sales_floor = if role_value == ROLE_RETAILER {
+                price_floor / (price_reduction as f64).max(epsilon64)
+            } else {
+                price_floor
+            };
+            if (sales_price[[agent_id, good_id]] as f64) < sales_floor {
+                sales_price[[agent_id, good_id]] = sales_floor as f32;
+            }
+        }
+        if role_value == ROLE_RETAILER
+            && purchase_price_value >= sales_price[[agent_id, good_id]] as f64
+        {
+            let discounted_purchase = mul_assign_like_numpy_float32(
+                sales_price[[agent_id, good_id]] as f64,
+                price_reduction,
+            );
+            if discounted_purchase >= price_floor {
+                purchase_price_value = discounted_purchase;
+            } else {
+                purchase_price_value = price_floor;
+                let sales_floor = price_floor / (price_reduction as f64).max(epsilon64);
+                if (sales_price[[agent_id, good_id]] as f64) < sales_floor {
+                    sales_price[[agent_id, good_id]] = sales_floor as f32;
+                }
+            }
+        }
+        purchase_price[[agent_id, good_id]] = purchase_price_value as f32;
+
+        let mut sales_price_value = sales_price[[agent_id, good_id]] as f64;
+        let previous_sales_price = sales_price_value;
+        if scarcity_case == 0 {
+            if role_value == ROLE_CONSUMER {
+                let target = production_cost.min(purchase_price[[agent_id, good_id]] as f64);
+                if sales_price_value < target {
+                    sales_price_value = price_hike * target;
+                }
+            } else if role_value == ROLE_RETAILER {
+                let purchased = purchased_this_period[[agent_id, good_id]] as f64;
+                let sold = sold_this_period[[agent_id, good_id]] as f64;
+                let tolerance = min_trade_quantity.max(EPSILON as f64);
+                let sell_through = sold > 0.0 && sold + tolerance >= purchased;
+                if sales_times[[agent_id, good_id]] > 1 && sell_through {
+                    let blended_price = ((sum_period_sales_value[[agent_id, good_id]]
+                        + sales_price[[agent_id, good_id]])
+                        / ((sales_times[[agent_id, good_id]] + 1) as f32))
+                        as f64;
+                    sales_price_value = blended_price.min(price_leap * previous_sales_price);
+                }
+                if sales_price_value < purchase_price[[agent_id, good_id]] as f64 {
+                    sales_price_value = purchase_price[[agent_id, good_id]] as f64;
+                }
+                if sales_times[[agent_id, good_id]] == 0 && surplus > tolerance {
+                    sales_price_value =
+                        mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+                }
+            } else if role_value == ROLE_PRODUCER && sales_price_value < production_cost {
+                sales_price_value = price_hike * production_cost;
+            }
+        } else if scarcity_case == 1 {
+            if role_value == ROLE_CONSUMER {
+                sales_price_value = production_cost.max(purchase_price[[agent_id, good_id]] as f64);
+                if surplus > (stock_limit_value / 2.0) {
+                    sales_price_value =
+                        ((purchase_price[[agent_id, good_id]] as f64) * 2.0).min(production_cost);
+                }
+            } else if role_value == ROLE_RETAILER {
+                if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                    sales_price_value =
+                        mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+                }
+            } else if role_value == ROLE_PRODUCER {
+                if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                    sales_price_value = production_cost;
+                } else if sales_price_value < production_cost {
+                    sales_price_value = price_hike * production_cost;
+                }
+            }
+        } else if role_value == ROLE_CONSUMER {
+            sales_price_value = mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+        } else if role_value == ROLE_RETAILER {
+            if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                if sales_price_value > purchase_price[[agent_id, good_id]] as f64 {
+                    sales_price_value = purchase_price[[agent_id, good_id]] as f64;
+                } else {
+                    sales_price_value =
+                        mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+                }
+            }
+        } else if role_value == ROLE_PRODUCER {
+            if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                if sold_this_period[[agent_id, good_id]] <= min_trade_quantity as f32 {
+                    if sales_price_value > production_cost {
+                        sales_price_value = production_cost;
+                    } else {
+                        sales_price_value =
+                            mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+                    }
+                } else {
+                    sales_price_value =
+                        mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+                }
+            }
+        }
+        if price_floor > 0.0 {
+            let sales_floor = if role_value == ROLE_RETAILER {
+                price_floor / (price_reduction as f64).max(epsilon64)
+            } else {
+                price_floor
+            };
+            sales_price_value = sales_price_value.max(sales_floor);
+        }
+        if role_value == ROLE_RETAILER
+            && purchase_price[[agent_id, good_id]] as f64 >= sales_price_value
+        {
+            let discounted_purchase =
+                mul_assign_like_numpy_float32(sales_price_value, price_reduction);
+            if discounted_purchase >= price_floor {
+                purchase_price[[agent_id, good_id]] = discounted_purchase as f32;
+            } else {
+                purchase_price[[agent_id, good_id]] = price_floor as f32;
+                sales_price_value =
+                    sales_price_value.max(price_floor / (price_reduction as f64).max(epsilon64));
+            }
+        }
+        sales_price[[agent_id, good_id]] = sales_price_value as f32;
+
+        spoilage[[agent_id, good_id]] = 0.0;
+        if (stock[[agent_id, good_id]] as f64)
+            > (stock_limit_multiplier * (market_elastic_need[good_id] as f64))
+        {
+            if (stock[[agent_id, good_id]] as f64)
+                > (stock_spoil_threshold * (stock_limit[[agent_id, good_id]] as f64))
+            {
+                if stock[[agent_id, good_id]] > stock_limit[[agent_id, good_id]] {
+                    let spoiled = ((stock[[agent_id, good_id]] as f64)
+                        - (stock_limit[[agent_id, good_id]] as f64))
+                        * spoilage_rate;
+                    spoilage[[agent_id, good_id]] = spoiled as f32;
+                    stock[[agent_id, good_id]] -= spoiled as f32;
+                    periodic_spoilage[agent_id] += spoiled as f32;
+                    market_periodic_spoilage[good_id] += spoiled as f32;
+                }
+            }
+        }
+
+        recent_production[[agent_id, good_id]] *= activity_discount as f32;
+        recent_sales[[agent_id, good_id]] *= activity_discount as f32;
+        recent_purchases[[agent_id, good_id]] *= activity_discount as f32;
+        recent_inventory_inflow[[agent_id, good_id]] *= activity_discount as f32;
+        recent_purchase_value[[agent_id, good_id]] *= activity_discount as f32;
+        recent_sales_value[[agent_id, good_id]] *= activity_discount as f32;
+        recent_inventory_inflow_value[[agent_id, good_id]] *= activity_discount as f32;
+        purchase_times[[agent_id, good_id]] = 0;
+        sales_times[[agent_id, good_id]] = 0;
+        sum_period_purchase_value[[agent_id, good_id]] = 0.0;
+        sum_period_sales_value[[agent_id, good_id]] = 0.0;
+        produced_last_period[[agent_id, good_id]] = produced_this_period[[agent_id, good_id]];
+        sold_last_period[[agent_id, good_id]] = sold_this_period[[agent_id, good_id]];
+        purchased_last_period[[agent_id, good_id]] = purchased_this_period[[agent_id, good_id]];
+    }
+
+    for friend_slot in 0..acquaintances {
+        for good_id in 0..goods {
+            let mut transparency_value = initial_transparency;
+            let transactions = friend_activity[[agent_id, friend_slot]] as f64;
+            if transactions > 0.0 {
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * (transactions / (transactions + goods as f64));
+            }
+            let purchased = friend_purchased[[agent_id, friend_slot, good_id]] as f64;
+            transparency_value += ((1.0 - transparency_value) * 0.7)
+                * ((10.0 * purchased) / ((10.0 * purchased) + (cycle + 1) as f64).max(epsilon64));
+            let recent_purchased_value = recent_purchases[[agent_id, good_id]] as f64;
+            transparency_value += ((1.0 - transparency_value) * 0.7)
+                * (recent_purchased_value
+                    / (recent_purchased_value + (10.0 * history as f64)).max(epsilon64));
+            if talent_mask[[agent_id, good_id]] > 0.0 {
+                transparency_value += (1.0 - transparency_value) * 0.5;
+            }
+            transparency[[agent_id, friend_slot, good_id]] = transparency_value.min(1.0) as f32;
+        }
+        if friend_activity[[agent_id, friend_slot]] > 1.0 {
+            friend_activity[[agent_id, friend_slot]] *= 0.9;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_agent_for_consumption_internal(
     agent_id: usize,
@@ -2280,6 +2923,7 @@ fn prepare_agent_for_consumption_internal(
     max_needs_increase: f32,
     max_needs_reduction: f32,
     small_needs_increase: f32,
+    lifestyle_promotion_threshold: f32,
     small_needs_reduction: f32,
     _base_need: ArrayView2<'_, f32>,
     mut need: ArrayViewMut2<'_, f32>,
@@ -2345,7 +2989,7 @@ fn prepare_agent_for_consumption_internal(
         && (stock_level as f64) > (max_needs_increase as f64)
     {
         needs_level[agent_id] *= max_needs_increase;
-    } else if stock_level > small_needs_increase {
+    } else if stock_level > lifestyle_promotion_threshold {
         needs_level[agent_id] *= small_needs_increase;
     } else {
         needs_level[agent_id] *= small_needs_reduction;
@@ -2598,7 +3242,20 @@ fn run_agent_cycle_owned(
 ) -> PyResult<()> {
     runner.call_method1("_prepare_agent_for_consumption", (agent_id,))?;
     if uses_agent_basket_planning {
-        runner.call_method1("_satisfy_needs_by_exchange", (agent_id,))?;
+        let (proposed_count, accepted_count, accepted_volume, inventory_trade_volume) =
+            run_agent_basket_exchange_stage(
+                py,
+                runner.clone().unbind(),
+                agent_id,
+                CONSUMPTION_DEAL,
+            )?;
+        add_trade_stage_metrics(
+            engine,
+            proposed_count,
+            accepted_count,
+            accepted_volume,
+            inventory_trade_volume,
+        )?;
     } else if uses_native_exchange_stage {
         let (proposed_count, accepted_count, accepted_volume, inventory_trade_volume) =
             run_exchange_stage(py, runner.clone().unbind(), agent_id, CONSUMPTION_DEAL)?;
@@ -2614,7 +3271,15 @@ fn run_agent_cycle_owned(
     }
     runner.call_method1("_advance_agent_to_surplus_stage", (agent_id,))?;
     if uses_agent_basket_planning {
-        runner.call_method1("_make_surplus_deals", (agent_id,))?;
+        let (proposed_count, accepted_count, accepted_volume, inventory_trade_volume) =
+            run_agent_basket_exchange_stage(py, runner.clone().unbind(), agent_id, SURPLUS_DEAL)?;
+        add_trade_stage_metrics(
+            engine,
+            proposed_count,
+            accepted_count,
+            accepted_volume,
+            inventory_trade_volume,
+        )?;
     } else if uses_native_exchange_stage {
         let (proposed_count, accepted_count, accepted_volume, inventory_trade_volume) =
             run_exchange_stage(py, runner.clone().unbind(), agent_id, SURPLUS_DEAL)?;
@@ -2664,6 +3329,7 @@ fn prepare_agent_for_consumption(
     max_needs_increase: f32,
     max_needs_reduction: f32,
     small_needs_increase: f32,
+    lifestyle_promotion_threshold: f32,
     small_needs_reduction: f32,
     base_need: PyReadonlyArray2<'_, f32>,
     mut need: PyReadwriteArray2<'_, f32>,
@@ -2746,7 +3412,7 @@ fn prepare_agent_for_consumption(
         && (stock_level as f64) > (max_needs_increase as f64)
     {
         needs_level[agent_id] *= max_needs_increase;
-    } else if stock_level > small_needs_increase {
+    } else if stock_level > lifestyle_promotion_threshold {
         needs_level[agent_id] *= small_needs_increase;
     } else {
         needs_level[agent_id] *= small_needs_reduction;
@@ -3281,9 +3947,8 @@ fn aspirational_stock_target_for_good(
     if aspirational_stock_target <= EPSILON as f64 {
         return 0.0;
     }
-    let own_need_target = (elastic_need[good_id] as f64)
-        * (needs_level[agent_id] as f64)
-        * aspirational_stock_target;
+    let own_need_target =
+        (elastic_need[good_id] as f64) * (needs_level[agent_id] as f64) * aspirational_stock_target;
     own_need_target
         .min(stock_limit[[agent_id, good_id]] as f64)
         .max(0.0)
@@ -3365,12 +4030,13 @@ fn local_liquidity_stock_scale(
     }
 
     let own_sales = recent_sales[[agent_id, good_id]] as f64;
-    let own_sources =
-        (recent_purchases[[agent_id, good_id]] + recent_inventory_inflow[[agent_id, good_id]])
-            as f64;
+    let own_sources = (recent_purchases[[agent_id, good_id]]
+        + recent_inventory_inflow[[agent_id, good_id]]) as f64;
     let observed_turnover = own_sales.min(own_sources).max(0.0);
     let bootstrap_floor = local_liquidity_min_sales.max(1.0);
-    observed_turnover.max(observed_acceptance).max(bootstrap_floor)
+    observed_turnover
+        .max(observed_acceptance)
+        .max(bootstrap_floor)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3430,10 +4096,7 @@ fn local_liquidity_score(
     };
     let volume_scale = (local_liquidity_min_sales * history.max(1) as f64).max(1.0);
     let volume_score = (observed_acceptance / volume_scale).min(1.0);
-    (transparency_score
-        * acceptance_breadth.sqrt()
-        * turnover_score.max(0.25)
-        * volume_score)
+    (transparency_score * acceptance_breadth.sqrt() * turnover_score.max(0.25) * volume_score)
         .clamp(0.0, 1.0)
 }
 
@@ -3579,6 +4242,7 @@ fn plan_agent_basket_candidates_from_views(
     recent_production: ArrayView2<'_, f32>,
     friend_sold: ArrayView3<'_, f32>,
     candidate_depth: usize,
+    disable_offer_prefilter: bool,
 ) -> Vec<BasketCandidate> {
     if agent_id >= stock.nrows()
         || goods > stock.ncols()
@@ -3635,6 +4299,7 @@ fn plan_agent_basket_candidates_from_views(
         friend_id,
         friend_sold,
         candidate_depth,
+        disable_offer_prefilter,
     )
 }
 
@@ -3651,6 +4316,7 @@ fn plan_one_basket_candidate_from_cached_links(
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
     forbidden_offer_by_need: &[bool],
+    available_offer_goods: &[usize],
     elastic_need: ArrayView1<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
@@ -3706,6 +4372,7 @@ fn plan_one_basket_candidate_from_cached_links(
         need_good,
         initial_transparency,
         forbidden_offer_by_need,
+        available_offer_goods,
         friend_ids_row,
         reciprocal_slots_view,
         my_stock,
@@ -3751,6 +4418,7 @@ fn plan_need_basket_candidates_from_cached_links(
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
     forbidden_offer_by_need: &[bool],
+    available_offer_goods: &[usize],
     elastic_need: ArrayView1<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
@@ -3811,6 +4479,7 @@ fn plan_need_basket_candidates_from_cached_links(
             need_good,
             initial_transparency,
             &local_forbidden,
+            available_offer_goods,
             friend_ids_row,
             reciprocal_slots_view,
             my_stock,
@@ -3839,7 +4508,11 @@ fn plan_need_basket_candidates_from_cached_links(
             break;
         }
         let forbidden_index = (need_good * goods) + offer_good;
-        if local_forbidden.get(forbidden_index).copied().unwrap_or(true) {
+        if local_forbidden
+            .get(forbidden_index)
+            .copied()
+            .unwrap_or(true)
+        {
             break;
         }
         let order = ((need_good * acquaintances) + (search_candidate.friend_slot as usize))
@@ -3856,6 +4529,231 @@ fn plan_need_basket_candidates_from_cached_links(
         local_forbidden[forbidden_index] = true;
     }
     candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_static_basket_candidate_lists(
+    agent_id: usize,
+    goods: usize,
+    acquaintances: usize,
+    initial_transparency: f32,
+    role: ArrayView2<'_, i32>,
+    purchase_price: ArrayView2<'_, f32>,
+    sales_price: ArrayView2<'_, f32>,
+    transparency: ArrayView3<'_, f32>,
+    friend_ids_row: ArrayView1<'_, i32>,
+    reciprocal_slots_view: ArrayView1<'_, i32>,
+) -> Vec<Vec<BasketCandidate>> {
+    let my_sales_price = sales_price.row(agent_id);
+    let my_purchase_price = purchase_price.row(agent_id);
+    let my_role = role.row(agent_id);
+    let my_transparency = transparency.index_axis(Axis(0), agent_id);
+
+    (0..goods)
+        .into_par_iter()
+        .map(|need_good| {
+            let my_need_purchase_price = my_purchase_price[need_good];
+            let my_need_is_producer = my_role[need_good] == ROLE_PRODUCER;
+            let mut candidates = Vec::new();
+            for friend_slot in 0..acquaintances {
+                let friend_id = friend_ids_row[friend_slot];
+                if friend_id < 0 {
+                    continue;
+                }
+                let fid = friend_id as usize;
+                let reciprocal_slot = reciprocal_slots_view[friend_slot];
+                for offer_good in 0..goods {
+                    if offer_good == need_good {
+                        continue;
+                    }
+                    let receiving_transparency = if reciprocal_slot >= 0 {
+                        transparency[[fid, reciprocal_slot as usize, offer_good]]
+                    } else {
+                        initial_transparency
+                    };
+                    let need_transparency = my_transparency[[friend_slot, need_good]];
+                    let friend_need_role = role[[fid, need_good]] as f32;
+                    let friend_need_sales_price = sales_price[[fid, need_good]];
+
+                    let mut score = (purchase_price[[fid, offer_good]]
+                        / friend_need_sales_price.max(EPSILON))
+                        * need_transparency;
+                    score -= my_sales_price[offer_good]
+                        / (my_need_purchase_price * receiving_transparency).max(EPSILON);
+                    score *= my_role[offer_good] as f32;
+                    score *= friend_need_role;
+                    if my_need_is_producer {
+                        score /= 2.0;
+                    }
+                    if score <= 0.0 {
+                        continue;
+                    }
+                    let order = ((need_good * acquaintances) + friend_slot).saturating_mul(goods)
+                        + offer_good;
+                    candidates.push(BasketCandidate {
+                        score,
+                        need_good: need_good as i32,
+                        friend_slot: friend_slot as i32,
+                        friend_id,
+                        offer_good: offer_good as i32,
+                        order,
+                    });
+                }
+            }
+            candidates.sort_by(|left, right| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.order.cmp(&right.order))
+            });
+            candidates
+        })
+        .collect()
+}
+
+fn build_static_basket_candidate_indexes(
+    static_candidate_lists: &[Vec<BasketCandidate>],
+    goods: usize,
+    acquaintances: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    let mut offer_to_needs: Vec<Vec<usize>> = vec![Vec::new(); goods];
+    let mut offer_friend_to_needs: Vec<Vec<usize>> = vec![Vec::new(); goods * acquaintances];
+    let mut seen_offer_need = vec![false; goods * goods];
+
+    for (need_good, candidates) in static_candidate_lists.iter().enumerate() {
+        for candidate in candidates {
+            if candidate.offer_good < 0 || candidate.friend_slot < 0 {
+                continue;
+            }
+            let offer_good = candidate.offer_good as usize;
+            let friend_slot = candidate.friend_slot as usize;
+            if offer_good >= goods || friend_slot >= acquaintances {
+                continue;
+            }
+
+            let offer_need_index = (offer_good * goods) + need_good;
+            if !seen_offer_need[offer_need_index] {
+                seen_offer_need[offer_need_index] = true;
+                offer_to_needs[offer_good].push(need_good);
+            }
+
+            offer_friend_to_needs[(offer_good * acquaintances) + friend_slot].push(need_good);
+        }
+    }
+
+    (offer_to_needs, offer_friend_to_needs)
+}
+
+fn forbid_offer_good_for_all_needs(
+    forbidden_offer_by_need: &mut [bool],
+    goods: usize,
+    offer_good: usize,
+) -> bool {
+    if offer_good >= goods || forbidden_offer_by_need.len() < goods * goods {
+        return false;
+    }
+
+    let mut changed = false;
+    for need_good in 0..goods {
+        if need_good == offer_good {
+            continue;
+        }
+        let index = (need_good * goods) + offer_good;
+        if !forbidden_offer_by_need[index] {
+            forbidden_offer_by_need[index] = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn offer_good_exhausted_for_agent(
+    agent_id: usize,
+    offer_good: usize,
+    elastic_need: ArrayView1<'_, f32>,
+    stock: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+) -> bool {
+    if agent_id >= stock.nrows() || offer_good >= stock.ncols() || offer_good >= elastic_need.len()
+    {
+        return true;
+    }
+    stock[[agent_id, offer_good]] <= (elastic_need[offer_good] * needs_level[agent_id] + 1.0)
+}
+
+fn collect_available_offer_goods(
+    agent_id: usize,
+    goods: usize,
+    elastic_need: ArrayView1<'_, f32>,
+    stock: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    disable_offer_prefilter: bool,
+) -> Vec<usize> {
+    if agent_id >= stock.nrows() {
+        return Vec::new();
+    }
+    if disable_offer_prefilter {
+        return (0..goods)
+            .filter(|offer_good| *offer_good < stock.ncols() && *offer_good < elastic_need.len())
+            .collect();
+    }
+    let my_needs_level = needs_level[agent_id];
+    (0..goods)
+        .filter(|offer_good| {
+            *offer_good < stock.ncols()
+                && *offer_good < elastic_need.len()
+                && stock[[agent_id, *offer_good]]
+                    > ((elastic_need[*offer_good] * my_needs_level) + 1.0)
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn first_valid_static_basket_candidate(
+    agent_id: usize,
+    need_good: usize,
+    goods: usize,
+    start_index: usize,
+    forbidden_offer_by_need: &[bool],
+    static_candidates: &[BasketCandidate],
+    elastic_need: ArrayView1<'_, f32>,
+    stock: ArrayView2<'_, f32>,
+    role: ArrayView2<'_, i32>,
+    stock_limit: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    my_needs_level: f32,
+) -> Option<(BasketCandidate, usize)> {
+    for (candidate_index, candidate) in static_candidates.iter().enumerate().skip(start_index) {
+        if candidate.offer_good < 0 || candidate.friend_id < 0 {
+            continue;
+        }
+        let offer_good = candidate.offer_good as usize;
+        let friend_idx = candidate.friend_id as usize;
+        if offer_good == need_good
+            || friend_idx >= stock.nrows()
+            || forbidden_offer_by_need[(need_good * goods) + offer_good]
+        {
+            continue;
+        }
+        let friend_needs_level = needs_level[friend_idx];
+        if stock[[friend_idx, need_good]] <= (elastic_need[need_good] * friend_needs_level + 1.0) {
+            continue;
+        }
+        if stock[[agent_id, offer_good]] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
+            continue;
+        }
+        let gift_max_level = if role[[friend_idx, offer_good]] == ROLE_RETAILER {
+            stock_limit[[friend_idx, offer_good]] - 1.0
+        } else {
+            elastic_need[offer_good] * friend_needs_level - 1.0
+        };
+        if stock[[friend_idx, offer_good]] >= gift_max_level {
+            continue;
+        }
+        return Some((*candidate, candidate_index));
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3888,6 +4786,7 @@ fn plan_agent_basket_candidates_from_cached_links(
     friend_id: ArrayView2<'_, i32>,
     friend_sold: ArrayView3<'_, f32>,
     candidate_depth: usize,
+    disable_offer_prefilter: bool,
 ) -> Vec<BasketCandidate> {
     if agent_id >= stock.nrows()
         || goods > stock.ncols()
@@ -3907,10 +4806,19 @@ fn plan_agent_basket_candidates_from_cached_links(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
+    let available_offer_goods = collect_available_offer_goods(
+        agent_id,
+        goods,
+        elastic_need,
+        stock,
+        needs_level,
+        disable_offer_prefilter,
+    );
+    if available_offer_goods.is_empty() {
+        return Vec::new();
+    }
 
-    let basket_cell_count = goods
-        .saturating_mul(goods)
-        .saturating_mul(acquaintances);
+    let basket_cell_count = goods.saturating_mul(goods).saturating_mul(acquaintances);
     let candidate_depth = candidate_depth.max(1);
     let mut candidates: Vec<BasketCandidate> = if candidate_depth > 1 {
         if basket_cell_count >= PARALLEL_BASKET_MIN_CELLS {
@@ -3929,6 +4837,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                         local_liquidity_min_sales,
                         aspirational_stock_target,
                         forbidden_offer_by_need,
+                        &available_offer_goods,
                         elastic_need,
                         stock,
                         role,
@@ -3972,6 +4881,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                         local_liquidity_min_sales,
                         aspirational_stock_target,
                         forbidden_offer_by_need,
+                        &available_offer_goods,
                         elastic_need,
                         stock,
                         role,
@@ -4017,6 +4927,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                     local_liquidity_min_sales,
                     aspirational_stock_target,
                     forbidden_offer_by_need,
+                    &available_offer_goods,
                     elastic_need,
                     stock,
                     role,
@@ -4059,6 +4970,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                     local_liquidity_min_sales,
                     aspirational_stock_target,
                     forbidden_offer_by_need,
+                    &available_offer_goods,
                     elastic_need,
                     stock,
                     role,
@@ -4561,8 +5473,7 @@ fn run_exchange_stage(
                     plan.need_transparency,
                 );
                 let my_value_correction = exchange_value_to_me.max(EPSILON as f64).sqrt();
-                let friend_value_correction =
-                    exchange_value_to_friend.max(EPSILON as f64).sqrt();
+                let friend_value_correction = exchange_value_to_friend.max(EPSILON as f64).sqrt();
                 let my_purchase_unit_value =
                     div_like_numpy_float32(my_need_purchase_price, my_value_correction);
                 let my_sales_unit_value =
@@ -4725,12 +5636,10 @@ fn execute_planned_parallel_phenomenon_batch(
     let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
     let purchase_price: PyReadonlyArray2<'_, f32> = state.getattr("purchase_price")?.extract()?;
     let sales_price: PyReadonlyArray2<'_, f32> = state.getattr("sales_price")?.extract()?;
-    let mut transparency: PyReadwriteArray3<'_, f32> =
-        state.getattr("transparency")?.extract()?;
+    let mut transparency: PyReadwriteArray3<'_, f32> = state.getattr("transparency")?.extract()?;
     let mut friend_id: PyReadwriteArray2<'_, i32> = state.getattr("friend_id")?.extract()?;
     let mut need: PyReadwriteArray2<'_, f32> = state.getattr("need")?.extract()?;
-    let mut recent_sales: PyReadwriteArray2<'_, f32> =
-        state.getattr("recent_sales")?.extract()?;
+    let mut recent_sales: PyReadwriteArray2<'_, f32> = state.getattr("recent_sales")?.extract()?;
     let mut recent_purchases: PyReadwriteArray2<'_, f32> =
         state.getattr("recent_purchases")?.extract()?;
     let mut sold_this_period: PyReadwriteArray2<'_, f32> =
@@ -4747,8 +5656,7 @@ fn execute_planned_parallel_phenomenon_batch(
         state.getattr("recent_inventory_inflow_value")?.extract()?;
     let mut purchase_times: PyReadwriteArray2<'_, i32> =
         state.getattr("purchase_times")?.extract()?;
-    let mut sales_times: PyReadwriteArray2<'_, i32> =
-        state.getattr("sales_times")?.extract()?;
+    let mut sales_times: PyReadwriteArray2<'_, i32> = state.getattr("sales_times")?.extract()?;
     let mut sum_period_purchase_value: PyReadwriteArray2<'_, f32> =
         state.getattr("sum_period_purchase_value")?.extract()?;
     let mut sum_period_sales_value: PyReadwriteArray2<'_, f32> =
@@ -4757,8 +5665,7 @@ fn execute_planned_parallel_phenomenon_batch(
         state.getattr("friend_activity")?.extract()?;
     let mut friend_purchased: PyReadwriteArray3<'_, f32> =
         state.getattr("friend_purchased")?.extract()?;
-    let mut friend_sold: PyReadwriteArray3<'_, f32> =
-        state.getattr("friend_sold")?.extract()?;
+    let mut friend_sold: PyReadwriteArray3<'_, f32> = state.getattr("friend_sold")?.extract()?;
     let trade = state.getattr("trade")?;
     let mut proposal_friend_slot: PyReadwriteArray1<'_, i32> =
         trade.getattr("proposal_friend_slot")?.extract()?;
@@ -4867,8 +5774,8 @@ fn execute_planned_parallel_phenomenon_batch(
             ensured_slot
         };
 
-        let my_gift_out = (max_exchange * switch_average)
-            / receiving_transparency.max(EPSILON as f64);
+        let my_gift_out =
+            (max_exchange * switch_average) / receiving_transparency.max(EPSILON as f64);
         let friend_need_out = max_exchange / need_transparency.max(EPSILON as f64);
         let friend_gift_in = max_exchange * switch_average;
 
@@ -4946,8 +5853,7 @@ fn execute_planned_parallel_phenomenon_batch(
         let friend_value_correction = exchange_value_to_friend.max(EPSILON as f64).sqrt();
         let my_purchase_unit_value =
             div_like_numpy_float32(my_need_purchase_price, my_value_correction);
-        let my_sales_unit_value =
-            mul_like_numpy_float32(my_offer_sales_price, my_value_correction);
+        let my_sales_unit_value = mul_like_numpy_float32(my_offer_sales_price, my_value_correction);
         let friend_purchase_unit_value =
             div_like_numpy_float32(friend_offer_purchase_price, friend_value_correction);
         let friend_sales_unit_value =
@@ -5079,14 +5985,12 @@ fn run_parallel_phenomenon_agent_tail(
     let purchase_price: PyReadonlyArray2<'_, f32> = state.getattr("purchase_price")?.extract()?;
     let sales_price: PyReadonlyArray2<'_, f32> = state.getattr("sales_price")?.extract()?;
     let needs_level: PyReadonlyArray1<'_, f32> = state.getattr("needs_level")?.extract()?;
-    let mut transparency: PyReadwriteArray3<'_, f32> =
-        state.getattr("transparency")?.extract()?;
+    let mut transparency: PyReadwriteArray3<'_, f32> = state.getattr("transparency")?.extract()?;
     let mut friend_id: PyReadwriteArray2<'_, i32> = state.getattr("friend_id")?.extract()?;
     let mut need: PyReadwriteArray2<'_, f32> = state.getattr("need")?.extract()?;
     let recent_production: PyReadonlyArray2<'_, f32> =
         state.getattr("recent_production")?.extract()?;
-    let mut recent_sales: PyReadwriteArray2<'_, f32> =
-        state.getattr("recent_sales")?.extract()?;
+    let mut recent_sales: PyReadwriteArray2<'_, f32> = state.getattr("recent_sales")?.extract()?;
     let mut recent_purchases: PyReadwriteArray2<'_, f32> =
         state.getattr("recent_purchases")?.extract()?;
     let mut sold_this_period: PyReadwriteArray2<'_, f32> =
@@ -5103,8 +6007,7 @@ fn run_parallel_phenomenon_agent_tail(
         state.getattr("recent_inventory_inflow_value")?.extract()?;
     let mut purchase_times: PyReadwriteArray2<'_, i32> =
         state.getattr("purchase_times")?.extract()?;
-    let mut sales_times: PyReadwriteArray2<'_, i32> =
-        state.getattr("sales_times")?.extract()?;
+    let mut sales_times: PyReadwriteArray2<'_, i32> = state.getattr("sales_times")?.extract()?;
     let mut sum_period_purchase_value: PyReadwriteArray2<'_, f32> =
         state.getattr("sum_period_purchase_value")?.extract()?;
     let mut sum_period_sales_value: PyReadwriteArray2<'_, f32> =
@@ -5113,8 +6016,7 @@ fn run_parallel_phenomenon_agent_tail(
         state.getattr("friend_activity")?.extract()?;
     let mut friend_purchased: PyReadwriteArray3<'_, f32> =
         state.getattr("friend_purchased")?.extract()?;
-    let mut friend_sold: PyReadwriteArray3<'_, f32> =
-        state.getattr("friend_sold")?.extract()?;
+    let mut friend_sold: PyReadwriteArray3<'_, f32> = state.getattr("friend_sold")?.extract()?;
     let trade = state.getattr("trade")?;
     let mut proposal_friend_slot: PyReadwriteArray1<'_, i32> =
         trade.getattr("proposal_friend_slot")?.extract()?;
@@ -5334,8 +6236,7 @@ fn run_parallel_phenomenon_agent_tail(
         let friend_value_correction = exchange_value_to_friend.max(EPSILON as f64).sqrt();
         let my_purchase_unit_value =
             div_like_numpy_float32(my_need_purchase_price, my_value_correction);
-        let my_sales_unit_value =
-            mul_like_numpy_float32(my_offer_sales_price, my_value_correction);
+        let my_sales_unit_value = mul_like_numpy_float32(my_offer_sales_price, my_value_correction);
         let friend_purchase_unit_value =
             div_like_numpy_float32(friend_offer_purchase_price, friend_value_correction);
         let friend_sales_unit_value =
@@ -5478,14 +6379,12 @@ fn run_parallel_phenomenon_stage(
     let purchase_price: PyReadonlyArray2<'_, f32> = state.getattr("purchase_price")?.extract()?;
     let sales_price: PyReadonlyArray2<'_, f32> = state.getattr("sales_price")?.extract()?;
     let needs_level: PyReadonlyArray1<'_, f32> = state.getattr("needs_level")?.extract()?;
-    let mut transparency: PyReadwriteArray3<'_, f32> =
-        state.getattr("transparency")?.extract()?;
+    let mut transparency: PyReadwriteArray3<'_, f32> = state.getattr("transparency")?.extract()?;
     let mut friend_id: PyReadwriteArray2<'_, i32> = state.getattr("friend_id")?.extract()?;
     let mut need: PyReadwriteArray2<'_, f32> = state.getattr("need")?.extract()?;
     let recent_production: PyReadonlyArray2<'_, f32> =
         state.getattr("recent_production")?.extract()?;
-    let mut recent_sales: PyReadwriteArray2<'_, f32> =
-        state.getattr("recent_sales")?.extract()?;
+    let mut recent_sales: PyReadwriteArray2<'_, f32> = state.getattr("recent_sales")?.extract()?;
     let mut recent_purchases: PyReadwriteArray2<'_, f32> =
         state.getattr("recent_purchases")?.extract()?;
     let mut sold_this_period: PyReadwriteArray2<'_, f32> =
@@ -5502,8 +6401,7 @@ fn run_parallel_phenomenon_stage(
         state.getattr("recent_inventory_inflow_value")?.extract()?;
     let mut purchase_times: PyReadwriteArray2<'_, i32> =
         state.getattr("purchase_times")?.extract()?;
-    let mut sales_times: PyReadwriteArray2<'_, i32> =
-        state.getattr("sales_times")?.extract()?;
+    let mut sales_times: PyReadwriteArray2<'_, i32> = state.getattr("sales_times")?.extract()?;
     let mut sum_period_purchase_value: PyReadwriteArray2<'_, f32> =
         state.getattr("sum_period_purchase_value")?.extract()?;
     let mut sum_period_sales_value: PyReadwriteArray2<'_, f32> =
@@ -5512,8 +6410,7 @@ fn run_parallel_phenomenon_stage(
         state.getattr("friend_activity")?.extract()?;
     let mut friend_purchased: PyReadwriteArray3<'_, f32> =
         state.getattr("friend_purchased")?.extract()?;
-    let mut friend_sold: PyReadwriteArray3<'_, f32> =
-        state.getattr("friend_sold")?.extract()?;
+    let mut friend_sold: PyReadwriteArray3<'_, f32> = state.getattr("friend_sold")?.extract()?;
     let trade = state.getattr("trade")?;
     let mut proposal_friend_slot: PyReadwriteArray1<'_, i32> =
         trade.getattr("proposal_friend_slot")?.extract()?;
@@ -5581,7 +6478,11 @@ fn run_parallel_phenomenon_stage(
             let friend_raw = friend_id[[agent_id, friend_slot]];
             if friend_raw >= 0 {
                 reciprocal_slots_cache[(agent_id * acquaintances) + friend_slot] =
-                    find_friend_slot_scan_internal(friend_id.view(), friend_raw as usize, agent_id as i32);
+                    find_friend_slot_scan_internal(
+                        friend_id.view(),
+                        friend_raw as usize,
+                        agent_id as i32,
+                    );
             }
         }
     }
@@ -5719,8 +6620,10 @@ fn run_parallel_phenomenon_stage(
                     &mut transparency,
                 ) as usize;
                 changed_agents.insert(friend_idx);
-                reciprocal_slots_cache[(agent_id * acquaintances) + friend_slot] = ensured_slot as i32;
-                reciprocal_slots_cache[(friend_idx * acquaintances) + ensured_slot] = friend_slot as i32;
+                reciprocal_slots_cache[(agent_id * acquaintances) + friend_slot] =
+                    ensured_slot as i32;
+                reciprocal_slots_cache[(friend_idx * acquaintances) + ensured_slot] =
+                    friend_slot as i32;
                 ensured_slot
             };
             let max_exchange = candidate.max_exchange;
@@ -5901,6 +6804,9 @@ fn run_basket_session_internal(
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
     replan_after_each_trade: bool,
+    disable_replan_cache: bool,
+    disable_offer_prefilter: bool,
+    pairwise_offer_exhaustion: bool,
     candidate_depth: usize,
     min_trade_quantity: f64,
     trade_rounding_buffer: f64,
@@ -5967,38 +6873,264 @@ fn run_basket_session_internal(
         return false;
     }
 
+    let use_replan_cache =
+        replan_after_each_trade && candidate_depth == 1 && !disable_replan_cache;
+    let mut cached_candidates: Vec<Option<BasketCandidate>> = vec![None; goods];
+    let mut dirty_needs: Vec<bool> = vec![true; goods];
+    let mut static_candidate_cursors: Vec<usize> = vec![0; goods];
+    let mut static_candidate_lists: Option<Vec<Vec<BasketCandidate>>> = None;
+    let mut static_offer_to_needs: Option<Vec<Vec<usize>>> = None;
+    let mut static_offer_friend_to_needs: Option<Vec<Vec<usize>>> = None;
     let mut attempts = 0usize;
     while attempts < max_attempts {
-        let candidates = plan_agent_basket_candidates_from_cached_links(
-            agent_id,
-            deal_type,
-            goods,
-            acquaintances,
-            initial_transparency,
-            history,
-            local_liquidity_stock_bias,
-            local_liquidity_min_sales,
-            aspirational_stock_target,
-            &forbidden_offer_by_need,
-            elastic_need,
-            stock.view(),
-            role,
-            stock_limit,
-            purchase_price,
-            sales_price,
-            needs_level,
-            transparency.view(),
-            ArrayView1::from(&agent_friend_ids[..]),
-            ArrayView1::from(&reciprocal_slots[..]),
-            need.view(),
-            recent_sales.view(),
-            recent_purchases.view(),
-            recent_inventory_inflow.view(),
-            recent_production,
-            friend_id.view(),
-            friend_sold.view(),
-            candidate_depth,
-        );
+        let candidates = if use_replan_cache {
+            let dirty_count = dirty_needs.iter().filter(|is_dirty| **is_dirty).count();
+            if attempts > 0 && static_candidate_lists.is_none() {
+                static_candidate_lists = Some(build_static_basket_candidate_lists(
+                    agent_id,
+                    goods,
+                    acquaintances,
+                    initial_transparency,
+                    role,
+                    purchase_price,
+                    sales_price,
+                    transparency.view(),
+                    ArrayView1::from(&agent_friend_ids[..]),
+                    ArrayView1::from(&reciprocal_slots[..]),
+                ));
+                let static_candidate_lists_ref = static_candidate_lists.as_ref().unwrap();
+                let (offer_to_needs, offer_friend_to_needs) =
+                    build_static_basket_candidate_indexes(
+                        static_candidate_lists_ref,
+                        goods,
+                        acquaintances,
+                    );
+                static_offer_to_needs = Some(offer_to_needs);
+                static_offer_friend_to_needs = Some(offer_friend_to_needs);
+            }
+            if let Some(static_candidate_lists_ref) = static_candidate_lists.as_ref() {
+                for need_good in 0..goods {
+                    if !dirty_needs[need_good] {
+                        continue;
+                    }
+                    cached_candidates[need_good] = if basket_stage_max_need(
+                        agent_id,
+                        need_good,
+                        deal_type,
+                        history,
+                        local_liquidity_stock_bias,
+                        local_liquidity_min_sales,
+                        aspirational_stock_target,
+                        elastic_need,
+                        stock.view(),
+                        stock_limit,
+                        needs_level,
+                        need.view(),
+                        recent_sales.view(),
+                        recent_purchases.view(),
+                        recent_inventory_inflow.view(),
+                        recent_production,
+                        friend_id.view(),
+                        friend_sold.view(),
+                        transparency.view(),
+                    ) <= 0.0
+                    {
+                        None
+                    } else {
+                        let start_index = static_candidate_cursors[need_good];
+                        let result = first_valid_static_basket_candidate(
+                            agent_id,
+                            need_good,
+                            goods,
+                            start_index,
+                            &forbidden_offer_by_need,
+                            &static_candidate_lists_ref[need_good],
+                            elastic_need,
+                            stock.view(),
+                            role,
+                            stock_limit,
+                            needs_level,
+                            needs_level[agent_id],
+                        );
+                        match result {
+                            Some((candidate, candidate_index)) => {
+                                static_candidate_cursors[need_good] = candidate_index;
+                                Some(candidate)
+                            }
+                            None => {
+                                static_candidate_cursors[need_good] =
+                                    static_candidate_lists_ref[need_good].len();
+                                None
+                            }
+                        }
+                    };
+                    dirty_needs[need_good] = false;
+                }
+            } else if dirty_count > goods.saturating_div(4).max(1) {
+                cached_candidates.fill(None);
+                let full_candidates = plan_agent_basket_candidates_from_cached_links(
+                    agent_id,
+                    deal_type,
+                    goods,
+                    acquaintances,
+                    initial_transparency,
+                    history,
+                    local_liquidity_stock_bias,
+                    local_liquidity_min_sales,
+                    aspirational_stock_target,
+                    &forbidden_offer_by_need,
+                    elastic_need,
+                    stock.view(),
+                    role,
+                    stock_limit,
+                    purchase_price,
+                    sales_price,
+                    needs_level,
+                    transparency.view(),
+                    ArrayView1::from(&agent_friend_ids[..]),
+                    ArrayView1::from(&reciprocal_slots[..]),
+                    need.view(),
+                    recent_sales.view(),
+                    recent_purchases.view(),
+                    recent_inventory_inflow.view(),
+                    recent_production,
+                    friend_id.view(),
+                    friend_sold.view(),
+                    candidate_depth,
+                    disable_offer_prefilter,
+                );
+                for candidate in full_candidates {
+                    if candidate.need_good >= 0 {
+                        let need_good = candidate.need_good as usize;
+                        if need_good < goods {
+                            cached_candidates[need_good] = Some(candidate);
+                        }
+                    }
+                }
+                dirty_needs.fill(false);
+            } else {
+                static_candidate_lists = Some(build_static_basket_candidate_lists(
+                    agent_id,
+                    goods,
+                    acquaintances,
+                    initial_transparency,
+                    role,
+                    purchase_price,
+                    sales_price,
+                    transparency.view(),
+                    ArrayView1::from(&agent_friend_ids[..]),
+                    ArrayView1::from(&reciprocal_slots[..]),
+                ));
+                let static_candidate_lists_ref = static_candidate_lists.as_ref().unwrap();
+                let (offer_to_needs, offer_friend_to_needs) =
+                    build_static_basket_candidate_indexes(
+                        static_candidate_lists_ref,
+                        goods,
+                        acquaintances,
+                    );
+                static_offer_to_needs = Some(offer_to_needs);
+                static_offer_friend_to_needs = Some(offer_friend_to_needs);
+                for need_good in 0..goods {
+                    if !dirty_needs[need_good] {
+                        continue;
+                    }
+                    cached_candidates[need_good] = if basket_stage_max_need(
+                        agent_id,
+                        need_good,
+                        deal_type,
+                        history,
+                        local_liquidity_stock_bias,
+                        local_liquidity_min_sales,
+                        aspirational_stock_target,
+                        elastic_need,
+                        stock.view(),
+                        stock_limit,
+                        needs_level,
+                        need.view(),
+                        recent_sales.view(),
+                        recent_purchases.view(),
+                        recent_inventory_inflow.view(),
+                        recent_production,
+                        friend_id.view(),
+                        friend_sold.view(),
+                        transparency.view(),
+                    ) <= 0.0
+                    {
+                        None
+                    } else {
+                        let start_index = static_candidate_cursors[need_good];
+                        let result = first_valid_static_basket_candidate(
+                            agent_id,
+                            need_good,
+                            goods,
+                            start_index,
+                            &forbidden_offer_by_need,
+                            &static_candidate_lists_ref[need_good],
+                            elastic_need,
+                            stock.view(),
+                            role,
+                            stock_limit,
+                            needs_level,
+                            needs_level[agent_id],
+                        );
+                        match result {
+                            Some((candidate, candidate_index)) => {
+                                static_candidate_cursors[need_good] = candidate_index;
+                                Some(candidate)
+                            }
+                            None => {
+                                static_candidate_cursors[need_good] =
+                                    static_candidate_lists_ref[need_good].len();
+                                None
+                            }
+                        }
+                    };
+                    dirty_needs[need_good] = false;
+                }
+            }
+            let mut best_candidate: Option<BasketCandidate> = None;
+            for candidate in cached_candidates.iter().flatten().copied() {
+                match best_candidate {
+                    Some(best)
+                        if best.score > candidate.score
+                            || (best.score == candidate.score && best.order < candidate.order) => {}
+                    _ => best_candidate = Some(candidate),
+                }
+            }
+            best_candidate.into_iter().collect()
+        } else {
+            plan_agent_basket_candidates_from_cached_links(
+                agent_id,
+                deal_type,
+                goods,
+                acquaintances,
+                initial_transparency,
+                history,
+                local_liquidity_stock_bias,
+                local_liquidity_min_sales,
+                aspirational_stock_target,
+                &forbidden_offer_by_need,
+                elastic_need,
+                stock.view(),
+                role,
+                stock_limit,
+                purchase_price,
+                sales_price,
+                needs_level,
+                transparency.view(),
+                ArrayView1::from(&agent_friend_ids[..]),
+                ArrayView1::from(&reciprocal_slots[..]),
+                need.view(),
+                recent_sales.view(),
+                recent_purchases.view(),
+                recent_inventory_inflow.view(),
+                recent_production,
+                friend_id.view(),
+                friend_sold.view(),
+                candidate_depth,
+                disable_offer_prefilter,
+            )
+        };
         if candidates.is_empty() {
             break;
         }
@@ -6045,6 +7177,11 @@ fn run_basket_session_internal(
                 transparency.view(),
             );
             if max_need <= 0.0 {
+                if use_replan_cache {
+                    cached_candidates[need_good] = None;
+                    dirty_needs[need_good] = true;
+                    changed_forbidden = true;
+                }
                 continue;
             }
 
@@ -6075,12 +7212,20 @@ fn run_basket_session_internal(
                     forbidden_offer_by_need[forbidden_index] = true;
                     changed_forbidden = true;
                 }
+                if use_replan_cache {
+                    cached_candidates[need_good] = None;
+                    dirty_needs[need_good] = true;
+                }
                 continue;
             };
             if plan.reason_code != PLAN_OK {
                 if !forbidden_offer_by_need[forbidden_index] {
                     forbidden_offer_by_need[forbidden_index] = true;
                     changed_forbidden = true;
+                }
+                if use_replan_cache {
+                    cached_candidates[need_good] = None;
+                    dirty_needs[need_good] = true;
                 }
                 continue;
             }
@@ -6110,10 +7255,13 @@ fn run_basket_session_internal(
 
             let max_exchange = plan.max_exchange;
             let remaining_need_after_trade = max_need - max_exchange;
-            let my_gift_out =
-                (max_exchange * plan.switch_average) / plan.receiving_transparency.max(EPSILON as f64);
+            let my_gift_out = (max_exchange * plan.switch_average)
+                / plan.receiving_transparency.max(EPSILON as f64);
             let friend_need_out = max_exchange / plan.need_transparency.max(EPSILON as f64);
             let friend_gift_in = max_exchange * plan.switch_average;
+            let my_need_stock_before = stock[[agent_id, need_good]];
+            let friend_need_stock_before = stock[[friend_idx, need_good]];
+            let friend_offer_stock_before = stock[[friend_idx, offer_good]];
 
             if deal_type == SURPLUS_DEAL {
                 stock[[agent_id, need_good]] += max_exchange as f32;
@@ -6257,9 +7405,118 @@ fn run_basket_session_internal(
 
             let exhausted_gift =
                 remaining_need_after_trade >= 1.0 && stock[[agent_id, offer_good]] < 1.0;
-            if exhausted_gift && !forbidden_offer_by_need[forbidden_index] {
+            let exhausted_offer_good = offer_good_exhausted_for_agent(
+                agent_id,
+                offer_good,
+                elastic_need,
+                stock.view(),
+                needs_level,
+            );
+            if exhausted_offer_good && !pairwise_offer_exhaustion {
+                if forbid_offer_good_for_all_needs(
+                    &mut forbidden_offer_by_need,
+                    goods,
+                    offer_good,
+                ) {
+                    changed_forbidden = true;
+                    if use_replan_cache {
+                        if let Some(offer_to_needs) = static_offer_to_needs.as_ref() {
+                            for indexed_need in &offer_to_needs[offer_good] {
+                                if *indexed_need < dirty_needs.len() {
+                                    dirty_needs[*indexed_need] = true;
+                                    static_candidate_cursors[*indexed_need] = 0;
+                                    cached_candidates[*indexed_need] = None;
+                                }
+                            }
+                        } else {
+                            dirty_needs.fill(true);
+                            static_candidate_cursors.fill(0);
+                            cached_candidates.fill(None);
+                        }
+                    }
+                }
+            } else if exhausted_gift && !forbidden_offer_by_need[forbidden_index] {
                 forbidden_offer_by_need[forbidden_index] = true;
                 changed_forbidden = true;
+            }
+            if use_replan_cache {
+                let mut dirty_all = false;
+                let mark_indexed_dirty = |needs_to_mark: &[usize],
+                                          dirty_needs: &mut [bool],
+                                          static_candidate_cursors: &mut [usize]| {
+                    for indexed_need in needs_to_mark {
+                        if *indexed_need < dirty_needs.len() {
+                            dirty_needs[*indexed_need] = true;
+                            static_candidate_cursors[*indexed_need] = 0;
+                        }
+                    }
+                };
+                if deal_type == SURPLUS_DEAL {
+                    let own_offer_threshold =
+                        (elastic_need[need_good] * needs_level[agent_id]) + 1.0;
+                    if my_need_stock_before <= own_offer_threshold
+                        && stock[[agent_id, need_good]] > own_offer_threshold
+                    {
+                        if let Some(offer_to_needs) = static_offer_to_needs.as_ref() {
+                            mark_indexed_dirty(
+                                &offer_to_needs[need_good],
+                                &mut dirty_needs,
+                                &mut static_candidate_cursors,
+                            );
+                        } else {
+                            dirty_all = true;
+                        }
+                    }
+                }
+                let friend_accept_threshold = if role[[friend_idx, need_good]] == ROLE_RETAILER {
+                    stock_limit[[friend_idx, need_good]] - 1.0
+                } else {
+                    elastic_need[need_good] * needs_level[friend_idx] - 1.0
+                };
+                if friend_need_stock_before >= friend_accept_threshold
+                    && stock[[friend_idx, need_good]] < friend_accept_threshold
+                {
+                    if let Some(offer_friend_to_needs) = static_offer_friend_to_needs.as_ref() {
+                        let index = (need_good * acquaintances) + friend_slot;
+                        mark_indexed_dirty(
+                            &offer_friend_to_needs[index],
+                            &mut dirty_needs,
+                            &mut static_candidate_cursors,
+                        );
+                    } else {
+                        dirty_all = true;
+                    }
+                }
+                if dirty_all {
+                    dirty_needs.fill(true);
+                    static_candidate_cursors.fill(0);
+                } else {
+                    dirty_needs[need_good] = true;
+                    dirty_needs[offer_good] = true;
+                    for cached in cached_candidates.iter().flatten().copied() {
+                        let cached_need = cached.need_good as usize;
+                        let cached_offer = cached.offer_good as usize;
+                        let cached_friend_slot = cached.friend_slot as usize;
+                        if cached_offer == offer_good
+                            || (cached_friend_slot == friend_slot && cached_offer == offer_good)
+                            || cached_need == need_good
+                            || cached_need == offer_good
+                        {
+                            dirty_needs[cached_need] = true;
+                        }
+                    }
+                }
+                let friend_offer_supply_threshold =
+                    (elastic_need[offer_good] * needs_level[friend_idx]) + 1.0;
+                if friend_offer_supply_threshold.is_finite()
+                    && friend_offer_stock_before <= friend_offer_supply_threshold
+                    && stock[[friend_idx, offer_good]] > friend_offer_supply_threshold
+                {
+                    dirty_needs[offer_good] = true;
+                    static_candidate_cursors[offer_good] = 0;
+                }
+                cached_candidates[need_good] = None;
+                cached_candidates[offer_good] = None;
             }
             if replan_after_each_trade {
                 break;
@@ -6318,6 +7575,15 @@ fn run_phenomenon_session_stage(
     let session_replan_after_trade: bool = config
         .getattr("experimental_session_replan_after_trade")?
         .extract()?;
+    let session_disable_replan_cache: bool = config
+        .getattr("experimental_session_disable_replan_cache")?
+        .extract()?;
+    let session_disable_offer_prefilter: bool = config
+        .getattr("experimental_session_disable_offer_prefilter")?
+        .extract()?;
+    let session_pairwise_offer_exhaustion: bool = config
+        .getattr("experimental_session_pairwise_offer_exhaustion")?
+        .extract()?;
     let session_candidate_depth: usize = config
         .getattr("experimental_session_candidate_depth")?
         .extract()?;
@@ -6335,14 +7601,12 @@ fn run_phenomenon_session_stage(
     let purchase_price: PyReadonlyArray2<'_, f32> = state.getattr("purchase_price")?.extract()?;
     let sales_price: PyReadonlyArray2<'_, f32> = state.getattr("sales_price")?.extract()?;
     let needs_level: PyReadonlyArray1<'_, f32> = state.getattr("needs_level")?.extract()?;
-    let mut transparency: PyReadwriteArray3<'_, f32> =
-        state.getattr("transparency")?.extract()?;
+    let mut transparency: PyReadwriteArray3<'_, f32> = state.getattr("transparency")?.extract()?;
     let mut friend_id: PyReadwriteArray2<'_, i32> = state.getattr("friend_id")?.extract()?;
     let mut need: PyReadwriteArray2<'_, f32> = state.getattr("need")?.extract()?;
     let recent_production: PyReadonlyArray2<'_, f32> =
         state.getattr("recent_production")?.extract()?;
-    let mut recent_sales: PyReadwriteArray2<'_, f32> =
-        state.getattr("recent_sales")?.extract()?;
+    let mut recent_sales: PyReadwriteArray2<'_, f32> = state.getattr("recent_sales")?.extract()?;
     let mut recent_purchases: PyReadwriteArray2<'_, f32> =
         state.getattr("recent_purchases")?.extract()?;
     let mut sold_this_period: PyReadwriteArray2<'_, f32> =
@@ -6359,8 +7623,7 @@ fn run_phenomenon_session_stage(
         state.getattr("recent_inventory_inflow_value")?.extract()?;
     let mut purchase_times: PyReadwriteArray2<'_, i32> =
         state.getattr("purchase_times")?.extract()?;
-    let mut sales_times: PyReadwriteArray2<'_, i32> =
-        state.getattr("sales_times")?.extract()?;
+    let mut sales_times: PyReadwriteArray2<'_, i32> = state.getattr("sales_times")?.extract()?;
     let mut sum_period_purchase_value: PyReadwriteArray2<'_, f32> =
         state.getattr("sum_period_purchase_value")?.extract()?;
     let mut sum_period_sales_value: PyReadwriteArray2<'_, f32> =
@@ -6369,8 +7632,7 @@ fn run_phenomenon_session_stage(
         state.getattr("friend_activity")?.extract()?;
     let mut friend_purchased: PyReadwriteArray3<'_, f32> =
         state.getattr("friend_purchased")?.extract()?;
-    let mut friend_sold: PyReadwriteArray3<'_, f32> =
-        state.getattr("friend_sold")?.extract()?;
+    let mut friend_sold: PyReadwriteArray3<'_, f32> = state.getattr("friend_sold")?.extract()?;
     let trade = state.getattr("trade")?;
     let mut proposal_friend_slot: PyReadwriteArray1<'_, i32> =
         trade.getattr("proposal_friend_slot")?.extract()?;
@@ -6452,6 +7714,9 @@ fn run_phenomenon_session_stage(
                 local_liquidity_min_sales,
                 aspirational_stock_target,
                 session_replan_after_trade,
+                session_disable_replan_cache,
+                session_disable_offer_prefilter,
+                session_pairwise_offer_exhaustion,
                 session_candidate_depth,
                 min_trade_quantity,
                 trade_rounding_buffer,
@@ -6547,6 +7812,15 @@ fn run_agent_basket_exchange_stage(
         .extract()?;
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
+        .extract()?;
+    let session_candidate_depth: usize = config
+        .getattr("experimental_session_candidate_depth")?
+        .extract()?;
+    let session_disable_offer_prefilter: bool = config
+        .getattr("experimental_session_disable_offer_prefilter")?
+        .extract()?;
+    let session_pairwise_offer_exhaustion: bool = config
+        .getattr("experimental_session_pairwise_offer_exhaustion")?
         .extract()?;
     let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
     let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
@@ -6711,7 +7985,8 @@ fn run_agent_basket_exchange_stage(
                 recent_production,
                 friend_id.view(),
                 friend_sold.view(),
-                1,
+                session_candidate_depth,
+                session_disable_offer_prefilter,
             );
             if candidates.is_empty() {
                 break;
@@ -6789,14 +8064,20 @@ fn run_agent_basket_exchange_stage(
                         forbidden_offer_by_need[forbidden_index] = true;
                         changed_forbidden = true;
                     }
-                    break;
+                    if session_candidate_depth <= 1 {
+                        break;
+                    }
+                    continue;
                 };
                 if plan.reason_code != PLAN_OK {
                     if !forbidden_offer_by_need[forbidden_index] {
                         forbidden_offer_by_need[forbidden_index] = true;
                         changed_forbidden = true;
                     }
-                    break;
+                    if session_candidate_depth <= 1 {
+                        break;
+                    }
+                    continue;
                 }
 
                 let friend_idx = plan.candidate.friend_id as usize;
@@ -6900,8 +8181,7 @@ fn run_agent_basket_exchange_stage(
                     plan.need_transparency,
                 );
                 let my_value_correction = exchange_value_to_me.max(EPSILON as f64).sqrt();
-                let friend_value_correction =
-                    exchange_value_to_friend.max(EPSILON as f64).sqrt();
+                let friend_value_correction = exchange_value_to_friend.max(EPSILON as f64).sqrt();
                 let my_purchase_unit_value =
                     div_like_numpy_float32(my_need_purchase_price, my_value_correction);
                 let my_sales_unit_value =
@@ -6972,7 +8252,22 @@ fn run_agent_basket_exchange_stage(
 
                 let exhausted_gift =
                     remaining_need_after_trade >= 1.0 && stock[[agent_id, offer_good]] < 1.0;
-                if exhausted_gift && !forbidden_offer_by_need[forbidden_index] {
+                if !session_pairwise_offer_exhaustion
+                    && offer_good_exhausted_for_agent(
+                    agent_id,
+                    offer_good,
+                    elastic_need,
+                    stock.view(),
+                    needs_level,
+                ) {
+                    if forbid_offer_good_for_all_needs(
+                        &mut forbidden_offer_by_need,
+                        goods,
+                        offer_good,
+                    ) {
+                        changed_forbidden = true;
+                    }
+                } else if exhausted_gift && !forbidden_offer_by_need[forbidden_index] {
                     forbidden_offer_by_need[forbidden_index] = true;
                     changed_forbidden = true;
                 }
@@ -7004,6 +8299,542 @@ fn run_agent_basket_exchange_stage(
     ))
 }
 
+fn run_full_native_agent_basket_cycle(
+    engine: &Bound<'_, PyAny>,
+    state: &Bound<'_, PyAny>,
+    market: &Bound<'_, PyAny>,
+    config: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let population: usize = config.getattr("population")?.extract()?;
+    let goods: usize = config.getattr("goods")?.extract()?;
+    let acquaintances: usize = config.getattr("acquaintances")?.extract()?;
+    let cycle: usize = engine.getattr("cycle")?.extract()?;
+    let seed_raw: i64 = config.getattr("seed")?.extract()?;
+    let seed = seed_raw.max(0) as u64;
+    let period_length: f32 = config.getattr("cycle_time_budget")?.extract()?;
+    let history: i32 = config.getattr("history")?.extract()?;
+    let basic_round_elastic: bool = config.getattr("basic_round_elastic")?.extract()?;
+    let stock_limit_multiplier: f32 = config.getattr("stock_limit_multiplier")?.extract()?;
+    let max_needs_increase: f32 = config.getattr("max_needs_increase")?.extract()?;
+    let max_needs_reduction: f32 = config.getattr("max_needs_reduction")?.extract()?;
+    let small_needs_increase: f32 = config.getattr("small_needs_increase")?.extract()?;
+    let lifestyle_promotion_threshold: f32 =
+        config.getattr("lifestyle_promotion_threshold")?.extract()?;
+    let small_needs_reduction: f32 = config.getattr("small_needs_reduction")?.extract()?;
+    let switch_time: f32 = config.getattr("switch_time")?.extract()?;
+    let initial_efficiency: f64 = config.getattr("initial_efficiency")?.extract()?;
+    let gifted_efficiency_floor: f64 = config.getattr("gifted_efficiency_floor")?.extract()?;
+    let initial_transparency_for_execution: f64 =
+        config.getattr("initial_transparency")?.extract()?;
+    let initial_transparency = initial_transparency_for_execution as f32;
+    let activity_discount: f64 = config.getattr("activity_discount")?.extract()?;
+    let spoilage_rate: f64 = config.getattr("spoilage_rate")?.extract()?;
+    let stock_spoil_threshold: f64 = config.getattr("stock_spoil_threshold")?.extract()?;
+    let price_reduction: f64 = config.getattr("price_reduction")?.extract()?;
+    let price_hike_f32: f32 = config.getattr("price_hike")?.extract()?;
+    let price_hike = price_hike_f32 as f64;
+    let price_leap: f64 = config.getattr("price_leap")?.extract()?;
+    let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
+    let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
+    let max_stocklimit_decrease: f64 = config.getattr("max_stocklimit_decrease")?.extract()?;
+    let max_stocklimit_increase: f64 = config.getattr("max_stocklimit_increase")?.extract()?;
+    let max_efficiency_downgrade: f64 = config.getattr("max_efficiency_downgrade")?.extract()?;
+    let max_efficiency_upgrade: f64 = config.getattr("max_efficiency_upgrade")?.extract()?;
+    let local_liquidity_stock_bias: f64 = config
+        .getattr("experimental_local_liquidity_stock_bias")?
+        .extract()?;
+    let local_liquidity_min_sales: f64 = config
+        .getattr("experimental_local_liquidity_min_sales")?
+        .extract()?;
+    let aspirational_stock_target: f64 = config
+        .getattr("experimental_aspirational_stock_target")?
+        .extract()?;
+    let session_candidate_depth: usize = config
+        .getattr("experimental_session_candidate_depth")?
+        .extract()?;
+    // Keep the direct per-agent basket branch selectable: long phenomenon
+    // runs use the config flag to decide whether a local basket is replayed
+    // after every trade or only revalidated from the existing shopping list.
+    let session_replan_after_trade: bool = config
+        .getattr("experimental_session_replan_after_trade")?
+        .extract()?;
+    let session_disable_replan_cache: bool = config
+        .getattr("experimental_session_disable_replan_cache")?
+        .extract()?;
+    let session_disable_offer_prefilter: bool = config
+        .getattr("experimental_session_disable_offer_prefilter")?
+        .extract()?;
+    let session_pairwise_offer_exhaustion: bool = config
+        .getattr("experimental_session_pairwise_offer_exhaustion")?
+        .extract()?;
+    let use_value_price_floor_fraction: f64 = config
+        .getattr("use_value_price_floor_fraction")?
+        .extract()?;
+    let legacy_price_floor: Option<f64> = config.getattr("legacy_price_floor")?.extract()?;
+    let max_attempts = goods.saturating_mul(acquaintances);
+    let initial_transactions = 2.0_f32;
+
+    let market_elastic_need: PyReadonlyArray1<'_, f32> =
+        market.getattr("elastic_need")?.extract()?;
+    let mut market_periodic_tce_cost: PyReadwriteArray1<'_, f32> =
+        market.getattr("periodic_tce_cost")?.extract()?;
+    let mut market_periodic_spoilage: PyReadwriteArray1<'_, f32> =
+        market.getattr("periodic_spoilage")?.extract()?;
+    let base_need: PyReadonlyArray2<'_, f32> = state.getattr("base_need")?.extract()?;
+    let mut need: PyReadwriteArray2<'_, f32> = state.getattr("need")?.extract()?;
+    let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
+    let mut stock_limit: PyReadwriteArray2<'_, f32> = state.getattr("stock_limit")?.extract()?;
+    let mut previous_stock_limit: PyReadwriteArray2<'_, f32> =
+        state.getattr("previous_stock_limit")?.extract()?;
+    let mut efficiency: PyReadwriteArray2<'_, f32> = state.getattr("efficiency")?.extract()?;
+    let mut learned_efficiency: PyReadwriteArray2<'_, f32> =
+        state.getattr("learned_efficiency")?.extract()?;
+    let mut purchase_price: PyReadwriteArray2<'_, f32> =
+        state.getattr("purchase_price")?.extract()?;
+    let mut sales_price: PyReadwriteArray2<'_, f32> = state.getattr("sales_price")?.extract()?;
+    let mut purchase_times: PyReadwriteArray2<'_, i32> =
+        state.getattr("purchase_times")?.extract()?;
+    let mut sales_times: PyReadwriteArray2<'_, i32> = state.getattr("sales_times")?.extract()?;
+    let mut sum_period_purchase_value: PyReadwriteArray2<'_, f32> =
+        state.getattr("sum_period_purchase_value")?.extract()?;
+    let mut sum_period_sales_value: PyReadwriteArray2<'_, f32> =
+        state.getattr("sum_period_sales_value")?.extract()?;
+    let mut recent_production: PyReadwriteArray2<'_, f32> =
+        state.getattr("recent_production")?.extract()?;
+    let mut recent_sales: PyReadwriteArray2<'_, f32> = state.getattr("recent_sales")?.extract()?;
+    let mut recent_purchases: PyReadwriteArray2<'_, f32> =
+        state.getattr("recent_purchases")?.extract()?;
+    let mut recent_inventory_inflow: PyReadwriteArray2<'_, f32> =
+        state.getattr("recent_inventory_inflow")?.extract()?;
+    let mut recent_purchase_value: PyReadwriteArray2<'_, f32> =
+        state.getattr("recent_purchase_value")?.extract()?;
+    let mut recent_sales_value: PyReadwriteArray2<'_, f32> =
+        state.getattr("recent_sales_value")?.extract()?;
+    let mut recent_inventory_inflow_value: PyReadwriteArray2<'_, f32> =
+        state.getattr("recent_inventory_inflow_value")?.extract()?;
+    let mut produced_this_period: PyReadwriteArray2<'_, f32> =
+        state.getattr("produced_this_period")?.extract()?;
+    let mut produced_last_period: PyReadwriteArray2<'_, f32> =
+        state.getattr("produced_last_period")?.extract()?;
+    let mut sold_this_period: PyReadwriteArray2<'_, f32> =
+        state.getattr("sold_this_period")?.extract()?;
+    let mut sold_last_period: PyReadwriteArray2<'_, f32> =
+        state.getattr("sold_last_period")?.extract()?;
+    let mut purchased_this_period: PyReadwriteArray2<'_, f32> =
+        state.getattr("purchased_this_period")?.extract()?;
+    let mut purchased_last_period: PyReadwriteArray2<'_, f32> =
+        state.getattr("purchased_last_period")?.extract()?;
+    let mut spoilage: PyReadwriteArray2<'_, f32> = state.getattr("spoilage")?.extract()?;
+    let mut periodic_spoilage: PyReadwriteArray1<'_, f32> =
+        state.getattr("periodic_spoilage")?.extract()?;
+    let talent_mask: PyReadonlyArray2<'_, f32> = state.getattr("talent_mask")?.extract()?;
+    let mut role: PyReadwriteArray2<'_, i32> = state.getattr("role")?.extract()?;
+    let mut time_remaining: PyReadwriteArray1<'_, f32> =
+        state.getattr("time_remaining")?.extract()?;
+    let mut timeout: PyReadwriteArray1<'_, i32> = state.getattr("timeout")?.extract()?;
+    let mut period_failure: PyReadwriteArray1<'_, bool> =
+        state.getattr("period_failure")?.extract()?;
+    let mut period_time_debt: PyReadwriteArray1<'_, f32> =
+        state.getattr("period_time_debt")?.extract()?;
+    let mut needs_level: PyReadwriteArray1<'_, f32> = state.getattr("needs_level")?.extract()?;
+    let mut recent_needs_increment: PyReadwriteArray1<'_, f32> =
+        state.getattr("recent_needs_increment")?.extract()?;
+    let mut transparency: PyReadwriteArray3<'_, f32> = state.getattr("transparency")?.extract()?;
+    let mut friend_id: PyReadwriteArray2<'_, i32> = state.getattr("friend_id")?.extract()?;
+    let mut friend_activity: PyReadwriteArray2<'_, f32> =
+        state.getattr("friend_activity")?.extract()?;
+    let mut friend_purchased: PyReadwriteArray3<'_, f32> =
+        state.getattr("friend_purchased")?.extract()?;
+    let mut friend_sold: PyReadwriteArray3<'_, f32> = state.getattr("friend_sold")?.extract()?;
+    let trade = state.getattr("trade")?;
+    let mut proposal_friend_slot: PyReadwriteArray1<'_, i32> =
+        trade.getattr("proposal_friend_slot")?.extract()?;
+    let mut proposal_target_agent: PyReadwriteArray1<'_, i32> =
+        trade.getattr("proposal_target_agent")?.extract()?;
+    let mut proposal_need_good: PyReadwriteArray1<'_, i32> =
+        trade.getattr("proposal_need_good")?.extract()?;
+    let mut proposal_offer_good: PyReadwriteArray1<'_, i32> =
+        trade.getattr("proposal_offer_good")?.extract()?;
+    let mut proposal_quantity: PyReadwriteArray1<'_, f32> =
+        trade.getattr("proposal_quantity")?.extract()?;
+    let mut proposal_score: PyReadwriteArray1<'_, f32> =
+        trade.getattr("proposal_score")?.extract()?;
+    let mut accepted_mask: PyReadwriteArray1<'_, bool> =
+        trade.getattr("accepted_mask")?.extract()?;
+    let mut accepted_quantity: PyReadwriteArray1<'_, f32> =
+        trade.getattr("accepted_quantity")?.extract()?;
+
+    let elastic_need = market_elastic_need.as_array();
+    let mut market_periodic_tce_cost = market_periodic_tce_cost.as_array_mut();
+    let mut market_periodic_spoilage = market_periodic_spoilage.as_array_mut();
+    let base_need = base_need.as_array();
+    let mut need = need.as_array_mut();
+    let mut stock = stock.as_array_mut();
+    let mut stock_limit = stock_limit.as_array_mut();
+    let mut previous_stock_limit = previous_stock_limit.as_array_mut();
+    let mut efficiency = efficiency.as_array_mut();
+    let mut learned_efficiency = learned_efficiency.as_array_mut();
+    let mut purchase_price = purchase_price.as_array_mut();
+    let mut sales_price = sales_price.as_array_mut();
+    let mut purchase_times = purchase_times.as_array_mut();
+    let mut sales_times = sales_times.as_array_mut();
+    let mut sum_period_purchase_value = sum_period_purchase_value.as_array_mut();
+    let mut sum_period_sales_value = sum_period_sales_value.as_array_mut();
+    let mut recent_production = recent_production.as_array_mut();
+    let mut recent_sales = recent_sales.as_array_mut();
+    let mut recent_purchases = recent_purchases.as_array_mut();
+    let mut recent_inventory_inflow = recent_inventory_inflow.as_array_mut();
+    let mut recent_purchase_value = recent_purchase_value.as_array_mut();
+    let mut recent_sales_value = recent_sales_value.as_array_mut();
+    let mut recent_inventory_inflow_value = recent_inventory_inflow_value.as_array_mut();
+    let mut produced_this_period = produced_this_period.as_array_mut();
+    let mut produced_last_period = produced_last_period.as_array_mut();
+    let mut sold_this_period = sold_this_period.as_array_mut();
+    let mut sold_last_period = sold_last_period.as_array_mut();
+    let mut purchased_this_period = purchased_this_period.as_array_mut();
+    let mut purchased_last_period = purchased_last_period.as_array_mut();
+    let mut spoilage = spoilage.as_array_mut();
+    let mut periodic_spoilage = periodic_spoilage.as_array_mut();
+    let talent_mask = talent_mask.as_array();
+    let mut role = role.as_array_mut();
+    let mut time_remaining = time_remaining.as_array_mut();
+    let mut timeout = timeout.as_array_mut();
+    let mut period_failure = period_failure.as_array_mut();
+    let mut period_time_debt = period_time_debt.as_array_mut();
+    let mut needs_level = needs_level.as_array_mut();
+    let mut recent_needs_increment = recent_needs_increment.as_array_mut();
+    let mut transparency = transparency.as_array_mut();
+    let mut friend_id = friend_id.as_array_mut();
+    let mut friend_activity = friend_activity.as_array_mut();
+    let mut friend_purchased = friend_purchased.as_array_mut();
+    let mut friend_sold = friend_sold.as_array_mut();
+    let mut proposal_friend_slot = proposal_friend_slot.as_array_mut();
+    let mut proposal_target_agent = proposal_target_agent.as_array_mut();
+    let mut proposal_need_good = proposal_need_good.as_array_mut();
+    let mut proposal_offer_good = proposal_offer_good.as_array_mut();
+    let mut proposal_quantity = proposal_quantity.as_array_mut();
+    let mut proposal_score = proposal_score.as_array_mut();
+    let mut accepted_mask = accepted_mask.as_array_mut();
+    let mut accepted_quantity = accepted_quantity.as_array_mut();
+
+    let mut totals = NativeStageTotals::default();
+    let mut exchange_totals = ExchangeStageTotals::default();
+    let mut changed_agents: HashSet<usize> = HashSet::new();
+
+    for agent_id in 0..population {
+        let (cycle_need_total, stock_consumed_total) = prepare_agent_for_consumption_internal(
+            agent_id,
+            goods,
+            period_length,
+            history,
+            basic_round_elastic,
+            stock_limit_multiplier,
+            max_needs_increase,
+            max_needs_reduction,
+            small_needs_increase,
+            lifestyle_promotion_threshold,
+            small_needs_reduction,
+            base_need,
+            need.view_mut(),
+            stock.view_mut(),
+            purchase_price.view(),
+            sales_price.view(),
+            purchased_last_period.view(),
+            recent_sales.view(),
+            sold_this_period.view(),
+            sold_last_period.view(),
+            recent_purchases.view(),
+            efficiency.view(),
+            period_failure.view(),
+            period_time_debt.view(),
+            needs_level.view_mut(),
+            recent_needs_increment.view_mut(),
+            elastic_need,
+        );
+        totals.cycle_need_total += cycle_need_total;
+        totals.stock_consumption_total += stock_consumed_total;
+
+        run_basket_session_internal(
+            agent_id,
+            CONSUMPTION_DEAL,
+            goods,
+            acquaintances,
+            initial_transparency_for_execution,
+            initial_transparency,
+            history,
+            local_liquidity_stock_bias,
+            local_liquidity_min_sales,
+            aspirational_stock_target,
+            session_replan_after_trade,
+            session_disable_replan_cache,
+            session_disable_offer_prefilter,
+            session_pairwise_offer_exhaustion,
+            session_candidate_depth,
+            min_trade_quantity,
+            trade_rounding_buffer,
+            max_attempts,
+            initial_transactions,
+            elastic_need,
+            &mut market_periodic_tce_cost,
+            &mut stock,
+            role.view(),
+            stock_limit.view(),
+            purchase_price.view(),
+            sales_price.view(),
+            needs_level.view(),
+            &mut transparency,
+            &mut friend_id,
+            &mut need,
+            recent_production.view(),
+            &mut recent_sales,
+            &mut recent_purchases,
+            &mut sold_this_period,
+            &mut purchased_this_period,
+            &mut recent_inventory_inflow,
+            &mut recent_purchase_value,
+            &mut recent_sales_value,
+            &mut recent_inventory_inflow_value,
+            &mut purchase_times,
+            &mut sales_times,
+            &mut sum_period_purchase_value,
+            &mut sum_period_sales_value,
+            &mut friend_activity,
+            &mut friend_purchased,
+            &mut friend_sold,
+            &mut proposal_friend_slot,
+            &mut proposal_target_agent,
+            &mut proposal_need_good,
+            &mut proposal_offer_good,
+            &mut proposal_quantity,
+            &mut proposal_score,
+            &mut accepted_mask,
+            &mut accepted_quantity,
+            &mut changed_agents,
+            &mut exchange_totals,
+        );
+
+        let produced_need_total = produce_need_internal(
+            agent_id,
+            goods,
+            efficiency.view(),
+            need.view_mut(),
+            time_remaining.view_mut(),
+            recent_production.view_mut(),
+            produced_this_period.view_mut(),
+            timeout.view_mut(),
+        );
+        totals.production_total += produced_need_total;
+
+        let mut pending_need = 0.0_f32;
+        for good_id in 0..goods {
+            pending_need += need[[agent_id, good_id]];
+        }
+        period_failure[agent_id] = time_remaining[agent_id] < 0.0 || pending_need > EPSILON;
+
+        add_random_friend_internal(
+            agent_id,
+            population,
+            acquaintances,
+            goods,
+            seed,
+            cycle,
+            initial_transparency,
+            initial_transactions,
+            &mut friend_id,
+            &mut friend_activity,
+            &mut friend_purchased,
+            &mut friend_sold,
+            &mut transparency,
+        );
+
+        if period_time_debt[agent_id] < 0.0 {
+            let half_debt = period_time_debt[agent_id] / 2.0;
+            time_remaining[agent_id] += half_debt;
+            period_time_debt[agent_id] = half_debt;
+        }
+
+        let produced_surplus_total = surplus_production_internal(
+            agent_id,
+            goods,
+            switch_time,
+            stock_limit_multiplier,
+            price_hike_f32,
+            base_need,
+            stock.view_mut(),
+            stock_limit.view(),
+            talent_mask,
+            purchase_times.view(),
+            efficiency.view(),
+            sales_price.view(),
+            time_remaining.view_mut(),
+            recent_production.view_mut(),
+            produced_this_period.view_mut(),
+        );
+        totals.production_total += produced_surplus_total;
+        totals.surplus_output_total += produced_surplus_total;
+
+        run_basket_session_internal(
+            agent_id,
+            SURPLUS_DEAL,
+            goods,
+            acquaintances,
+            initial_transparency_for_execution,
+            initial_transparency,
+            history,
+            local_liquidity_stock_bias,
+            local_liquidity_min_sales,
+            aspirational_stock_target,
+            session_replan_after_trade,
+            session_disable_replan_cache,
+            session_disable_offer_prefilter,
+            session_pairwise_offer_exhaustion,
+            session_candidate_depth,
+            min_trade_quantity,
+            trade_rounding_buffer,
+            max_attempts,
+            initial_transactions,
+            elastic_need,
+            &mut market_periodic_tce_cost,
+            &mut stock,
+            role.view(),
+            stock_limit.view(),
+            purchase_price.view(),
+            sales_price.view(),
+            needs_level.view(),
+            &mut transparency,
+            &mut friend_id,
+            &mut need,
+            recent_production.view(),
+            &mut recent_sales,
+            &mut recent_purchases,
+            &mut sold_this_period,
+            &mut purchased_this_period,
+            &mut recent_inventory_inflow,
+            &mut recent_purchase_value,
+            &mut recent_sales_value,
+            &mut recent_inventory_inflow_value,
+            &mut purchase_times,
+            &mut sales_times,
+            &mut sum_period_purchase_value,
+            &mut sum_period_sales_value,
+            &mut friend_activity,
+            &mut friend_purchased,
+            &mut friend_sold,
+            &mut proposal_friend_slot,
+            &mut proposal_target_agent,
+            &mut proposal_need_good,
+            &mut proposal_offer_good,
+            &mut proposal_quantity,
+            &mut proposal_score,
+            &mut accepted_mask,
+            &mut accepted_quantity,
+            &mut changed_agents,
+            &mut exchange_totals,
+        );
+
+        period_time_debt[agent_id] += time_remaining[agent_id];
+        if period_time_debt[agent_id] > 0.0 {
+            period_time_debt[agent_id] = 0.0;
+        }
+
+        let produced_leisure_total = leisure_production_internal(
+            agent_id,
+            goods,
+            stock.view_mut(),
+            stock_limit.view(),
+            talent_mask,
+            purchase_price.view(),
+            time_remaining.view_mut(),
+            recent_production.view_mut(),
+            produced_this_period.view_mut(),
+        );
+        totals.production_total += produced_leisure_total;
+        totals.surplus_output_total += produced_leisure_total;
+
+        end_agent_period_internal(
+            agent_id,
+            cycle,
+            goods,
+            acquaintances,
+            history,
+            initial_efficiency,
+            gifted_efficiency_floor,
+            initial_transparency_for_execution,
+            stock_limit_multiplier as f64,
+            activity_discount,
+            spoilage_rate,
+            stock_spoil_threshold,
+            price_reduction,
+            price_hike,
+            price_leap,
+            min_trade_quantity,
+            max_stocklimit_decrease,
+            max_stocklimit_increase,
+            max_efficiency_downgrade,
+            max_efficiency_upgrade,
+            base_need,
+            stock.view_mut(),
+            stock_limit.view_mut(),
+            previous_stock_limit.view_mut(),
+            efficiency.view_mut(),
+            learned_efficiency.view_mut(),
+            recent_production.view_mut(),
+            recent_sales.view_mut(),
+            recent_purchases.view_mut(),
+            recent_inventory_inflow.view_mut(),
+            recent_purchase_value.view_mut(),
+            recent_sales_value.view_mut(),
+            recent_inventory_inflow_value.view_mut(),
+            produced_this_period.view_mut(),
+            produced_last_period.view_mut(),
+            sold_this_period.view_mut(),
+            sold_last_period.view_mut(),
+            purchased_this_period.view_mut(),
+            purchased_last_period.view_mut(),
+            purchase_times.view_mut(),
+            sales_times.view_mut(),
+            sum_period_purchase_value.view_mut(),
+            sum_period_sales_value.view_mut(),
+            spoilage.view_mut(),
+            periodic_spoilage.view_mut(),
+            talent_mask,
+            role.view_mut(),
+            purchase_price.view_mut(),
+            sales_price.view_mut(),
+            friend_activity.view_mut(),
+            friend_purchased.view(),
+            transparency.view_mut(),
+            needs_level.view(),
+            elastic_need,
+            market_periodic_spoilage.view_mut(),
+            use_value_price_floor_fraction,
+            legacy_price_floor,
+        );
+    }
+
+    add_engine_metric(engine, "_cycle_need_total", totals.cycle_need_total)?;
+    add_engine_metric(engine, "_production_total", totals.production_total)?;
+    add_engine_metric(engine, "_surplus_output_total", totals.surplus_output_total)?;
+    add_engine_metric(
+        engine,
+        "_stock_consumption_total",
+        totals.stock_consumption_total,
+    )?;
+    add_engine_metric(
+        engine,
+        "_leisure_extra_need_total",
+        totals.leisure_extra_need_total,
+    )?;
+    add_trade_stage_metrics(
+        engine,
+        exchange_totals.proposed_count,
+        exchange_totals.accepted_count,
+        exchange_totals.accepted_volume,
+        exchange_totals.inventory_trade_volume,
+    )?;
+    Ok(())
+}
+
 #[pyfunction]
 fn run_exact_cycle(py: Python<'_>, engine: PyObject) -> PyResult<()> {
     let engine = engine.bind(py);
@@ -7029,6 +8860,14 @@ fn run_exact_cycle(py: Python<'_>, engine: PyObject) -> PyResult<()> {
     let config = runner.getattr("config")?;
     let state = runner.getattr("state")?;
     let market = runner.getattr("market")?;
+    let uses_native_stage_math: bool = config
+        .getattr("experimental_native_stage_math")?
+        .extract()?;
+    if uses_agent_basket_planning && uses_native_stage_math {
+        run_full_native_agent_basket_cycle(engine, &state, &market, &config)?;
+        runner.call_method0("_finalize_cycle_after_agent_loop")?;
+        return Ok(());
+    }
     let population: usize = config.getattr("population")?.extract()?;
     let goods: usize = config.getattr("goods")?.extract()?;
     let period_length: f32 = config.getattr("cycle_time_budget")?.extract()?;
@@ -7091,7 +8930,10 @@ fn _legacy_native_search(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyRes
     module.add_function(wrap_pyfunction!(find_best_exchange, module)?)?;
     module.add_function(wrap_pyfunction!(plan_best_exchange, module)?)?;
     module.add_function(wrap_pyfunction!(plan_exchange_basket, module)?)?;
-    module.add_function(wrap_pyfunction!(plan_parallel_phenomenon_candidates, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        plan_parallel_phenomenon_candidates,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(prepare_agent_for_consumption, module)?)?;
     module.add_function(wrap_pyfunction!(produce_need, module)?)?;
     module.add_function(wrap_pyfunction!(prepare_leisure_round, module)?)?;
@@ -7100,7 +8942,10 @@ fn _legacy_native_search(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyRes
         execute_planned_parallel_phenomenon_batch,
         module
     )?)?;
-    module.add_function(wrap_pyfunction!(run_parallel_phenomenon_agent_tail, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        run_parallel_phenomenon_agent_tail,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(run_parallel_phenomenon_stage, module)?)?;
     module.add_function(wrap_pyfunction!(run_phenomenon_session_stage, module)?)?;
     module.add_function(wrap_pyfunction!(run_agent_basket_exchange_stage, module)?)?;

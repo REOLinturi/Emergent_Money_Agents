@@ -146,42 +146,39 @@ The accepted interpretation is therefore:
 - faster speculative paths are useful as experiments, not as automatic replacements
 - more aggressive parallelism may become appropriate later if the modeled economy itself acquires posted-price and intermediary-like behavior
 
-## Implemented Phenomenon-Screening Paths
+## Active and Retired Phenomenon Paths
 
-The repository now has two phenomenon-screening paths. The old wave-based path remains available for rollback and comparison, but is marked deprecated. New exploratory phenomenon runs should use `--experimental-session-clearing-phenomenon-exchange`.
+The repository keeps two normal work targets:
 
-Neither path is the exact reference. Both keep the information boundary local but change the timing model.
+- `exact`: the reference path for correctness and selected short cross-checks
+- per-agent basket with Rust `replan_after_trade`: the current phenomenon-scale exploratory path
 
-### Deprecated wave path
+All other paths are now historical diagnostics unless explicitly named for a controlled comparison. The aim is to avoid repeatedly returning to branches that were already found to distort the economic timing or produce weak macro behavior.
 
-`--experimental-parallel-phenomenon-exchange` is the deprecated wave path:
+### Active phenomenon path: per-agent basket with after-trade replan
 
-- all active agents in the wave evaluate locally visible exchange opportunities from the same read-only snapshot
-- candidate scoring and best-offer reductions are performed in Rust with Rayon across agents
-- the scheduler keeps at most one committed decision per agent per wave
-- Rust materializes only each active agent's best next proposal for the scheduler; it still searches the full local opportunity set before that reduction
-- after each wave, active-agent continuation is determined by the next Rust planning pass rather than by a Python full-goods surplus scan. This keeps the same local information boundary while avoiding a redundant `agents * goods * waves` Python bottleneck.
-- candidates sharing a proposer or partner are treated as conflicts and discarded or retried in the next wave
-- the actual state mutation still uses the same exchange execution semantics for the scheduled conflict-free trades
-- preparation, need production, surplus production, leisure, and period-end arithmetic use existing native helpers where they have isolated parity coverage. The exact path remains separately gated before any such helper is promoted to strict reference use.
-- the entire phenomenon exchange stage can now be executed inside Rust, so Python no longer loops over every conflict-resolution wave. This is still not enough for the largest `100`-good probes when the market creates thousands of sequential surplus waves. The next large speed gain is therefore a model-level timing choice, such as bilateral session clearing, not another Python-overhead cleanup.
+The active phenomenon path uses `--experimental-agent-basket-planning` with `--experimental-session-replan-after-trade` and without `--experimental-session-clearing-phenomenon-exchange`.
 
-This path is kept only as a validation baseline while the session-clearing path is tested. It should not accumulate new production features unless needed for comparison.
+Its interpretation is:
 
-### Session-clearing path
+- one active agent acts from its own local information boundary
+- the agent can compare the locally visible opportunity set across its need basket and known acquaintances
+- one barter decision is committed only after revalidation against current stock, need, price, transparency, and capacity
+- after an accepted trade, the agent's local opportunity set is rebuilt from the changed state before the next barter decision
+- if a proposed offer good is exhausted, only that active `need_good/offer_good` pair is marked unusable before replanning; the same offer good may still be relevant for a different need-good in the same local basket
+- no agent receives global money scores, market-wide prices, role counts, dashboard aggregates, or information outside its own trading observations
 
-`--experimental-session-clearing-phenomenon-exchange` is the new preferred realism path:
+This is not the exact Legacy-C event sequence. It is a realism-oriented path: a person can inspect the offers and stocks visible in their local trading circle, choose a good trade, see the result, and then choose again. The path preserves the primitive-market timing asymmetry that appears necessary for price dispersion, merchant margins, specialization, cycles, and crises.
 
-- all active agents first enter the relevant decision stage
-- each agent then runs a local trading session over its known acquaintances and goods
-- the agent may compare the locally visible opportunity set rather than repeatedly seeing one fixed friend/good pair at a time
-- every candidate trade is revalidated against current stock, need, price, transparency, and capacity before commit
-- stale or no-longer-profitable candidates are skipped rather than committed from an obsolete snapshot
-- no agent receives global money scores, market-wide prices, role counts, or dashboard aggregates
+### Retired diagnostic paths
 
-The current implementation builds one ranked local shopping list per session stage, commits feasible candidates in that order, and does not rebuild the whole local basket after every accepted trade. This is the main speed distinction from the deprecated wave path. It is a semantic replacement candidate, not an exact replay path. If no anomalies appear, the wave path should be removed rather than maintained indefinitely.
+The following branches remain in the code only for named diagnostics or rollback comparisons:
 
-With no explicit hybrid parameters, both phenomenon paths use a population-wide frontier, disable frontier-partner blocking, and run both the consumption and surplus exchange stages. This makes them suitable for large exploratory runs where the goal is phenomenon-level screening rather than event-exact replay.
+- Static no-replan basket list: fast in the 3000/100/100 probe, but it produced much weaker macro growth than the earlier promising per-agent basket run. A single precomputed shopping list can become stale after the first accepted trades and leave later basket gaps unfilled.
+- Session-clearing path (`--experimental-session-clearing-phenomenon-exchange`): useful for testing local clearing hypotheses, but it can behave like an overly synchronized local market and reduce the price dispersion and merchant margin needed for specialization.
+- Wave path (`--experimental-parallel-phenomenon-exchange`): useful for conflict-resolution experiments, but not a production phenomenon path. It changes timing toward simultaneous snapshot decisions and should not receive new production features.
+- Multi-pass/candidate-depth variants: useful to diagnose stale-list effects and basket completion, but not the main branch unless a later validation run explicitly promotes one of them.
+- Global offer-exhaustion variant (`--experimental-session-global-offer-exhaustion`): rejected after the 2026-05-07 diagnostics. It treats one exhausted offer good as unusable for every need in the active basket, even though only one need/offer pair actually failed. This over-prunes the local basket and weakens the 3000/100/100 growth and monetization profile.
 
 ### Basket completion and re-planning diagnostics
 
@@ -194,9 +191,9 @@ Two mechanisms were identified:
 
 Current implementation status:
 
-- `--experimental-session-replan-passes N` rebuilds the local shopping list for each agent session up to `N` times. This is the current practical speed/quality control.
-- `--experimental-session-replan-after-trade` rebuilds the local shopping list after each accepted barter decision inside Rust. This is semantically closest to one decision at a time, but current probes show it is much slower and not clearly better than a bounded multi-pass session for large screening runs.
-- `--experimental-session-candidate-depth N` keeps up to `N` locally ranked alternatives for each need-good in the one-agent basket shopping list. It is still local-information only: the active agent ranks opportunities visible through its own acquaintance links, then commits feasible trades from that local list. `1` preserves the original fast session-clearing behavior.
+- `--experimental-session-replan-after-trade` rebuilds the local shopping list after each accepted barter decision inside Rust. This is the retained main phenomenon branch and the current speed-optimization target.
+- `--experimental-session-replan-passes N` rebuilds the local shopping list for each agent session up to `N` times. It remains a diagnostic for stale-list effects, not the default branch.
+- `--experimental-session-candidate-depth N` keeps up to `N` locally ranked alternatives for each need-good in the one-agent basket shopping list. It remains a diagnostic for basket-completion sensitivity. `1` is the current default for the after-trade replan branch.
 - Failed revalidation does not immediately force a rebuild; the agent can continue the same local shopping list because no inventory state changed.
 
 Empirical probe notes:
@@ -204,22 +201,26 @@ Empirical probe notes:
 - `100 agents / 100 goods / 50 acquaintances / 80 cycles`, aspirational target `2.0`: one session pass reached utility about `2.42`; eight session passes reached about `4.80`; after-trade replan reached about `4.83` but was much slower; full serial basket planning with native stage math reached about `5.59`.
 - `300 agents / 100 goods / 50 acquaintances / 200 cycles`, aspirational target `2.0`: one pass still left the median agent with many zero-stock goods and utility about `2.35`; eight passes reached utility about `9.04`, median zero-stock goods `0`, and median current-basket completion about `0.99`.
 - `3000 agents / 100 goods / 100 acquaintances`, aspirational target `2.0`, eight session passes: the first 100 cycles took about 519 seconds and reached utility about `5.59`; a continued run reached cycle `1025` with utility about `5.36`, rare-goods monetary share about `0.91`, value-weighted rare-goods monetary share about `0.61`, median zero-stock goods `0`, and median current-basket completion about `0.99`. The 525-1025 interval was mildly declining, so this path shows a plausible post-growth/adjustment phase rather than monotone early growth.
-- Candidate-depth probes, aspirational target `2.0`: at `100/100/50` for `80` cycles, depth `4` completed median baskets while running about `1.8x` faster than eight replan passes; depth `8` was still faster but did not clearly beat depth `4` in basket completion. At `3000/100/100` for `40` cycles, depth `4` took about `2.28` seconds/cycle versus about `3.69` seconds/cycle for eight replan passes, with median zero-stock goods `0` and median current-basket completion about `0.997`. This makes depth `4` the current first candidate for one-agent basket optimization probes.
+- Candidate-depth probes, aspirational target `2.0`: at `100/100/50` for `80` cycles, depth `4` completed median baskets while running about `1.8x` faster than eight replan passes; depth `8` was still faster but did not clearly beat depth `4` in basket completion. At `3000/100/100` for `40` cycles, depth `4` took about `2.28` seconds/cycle versus about `3.69` seconds/cycle for eight replan passes, with median zero-stock goods `0` and median current-basket completion about `0.997`. These runs remain diagnostic because the later no-replan/static-list 100-cycle probe was fast but macro-economically too weak.
+- The 500-cycle per-agent basket artifact `agentbasket_seq_direct_3000_100_100_500_seed2009_20260506` produced the desired macro pattern: strong growth, crash/recovery, renewed waves, friction spikes, and inequality dynamics. Subsequent code review showed that the successful timing should be interpreted as per-agent basket with internal after-trade replan, not as proof that a static no-replan shopping list is adequate.
+- The 2026-05-07 A/B diagnostic isolated a later regression to the offer-exhaustion invalidation rule. Pairwise exhaustion restored the c50 profile of the promising artifact (`living_standard_mean` about `3.03`, median about `2.60`, rare-money about `15.6 %`, value-weighted rare-money about `15.5 %`). Disabling the available-offer prefilter alone did not restore the profile, so the prefilter can remain as a speed optimization while the rejected global exhaustion rule stays diagnostic-only.
 
 Practical recommendation for phenomenon-screening runs:
 
-- use `--experimental-session-clearing-phenomenon-exchange`
+- use `--experimental-agent-basket-planning`
+- use `--experimental-session-replan-after-trade`
+- keep `--experimental-session-clearing-phenomenon-exchange` disabled
 - use `--experimental-aspirational-stock-target 2.0`
-- start with `--experimental-session-candidate-depth 4 --experimental-session-replan-passes 1`
-- keep `--experimental-session-replan-passes 8` as the conservative comparison baseline
-- reserve `--experimental-session-replan-after-trade` for semantic diagnostics, not default large runs
+- start with `--experimental-session-candidate-depth 1`
+- optimize this path in Rust before moving to CUDA
+- use exact-path runs only as short cross-checks and final reference validation, not for routine long searches
 
 This keeps the information boundary local while avoiding the unrealistic result where agents hold large undifferentiated inventories but fail to complete the baskets needed to raise living standard.
 
 Validation rule:
 
 - use the exact path for selected short cross-checks and final reference runs
-- use the parallel phenomenon path for long searches over parameters and seeds
+- use the Rust replan-after-trade per-agent basket path for long searches over parameters and seeds
 - accept path-dependent timing differences only if growth, monetization, welfare, friction, inequality, and cycle phenomena remain robust and non-tendentiously biased
 
-The next safe optimization step is native execution of an already scheduled conflict-free batch. That must accumulate shared market deltas, such as TCE by good, in per-thread buffers and apply them deterministically after the batch. Direct parallel writes to shared market arrays are not acceptable.
+The next safe optimization step is to reduce the cost of rebuilding the active agent's local opportunity set after each accepted trade without changing that decision order. Broader CUDA or conflict-free batch execution can be revisited after this branch has been benchmarked and validated.

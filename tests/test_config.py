@@ -3,6 +3,12 @@ import pytest
 from emergent_money.config import SimulationConfig
 
 
+def test_session_pairwise_offer_exhaustion_is_default() -> None:
+    config = SimulationConfig()
+
+    assert config.experimental_session_pairwise_offer_exhaustion is True
+
+
 def test_config_shapes_follow_parameters() -> None:
     config = SimulationConfig(
         population=32,
@@ -26,6 +32,7 @@ def test_config_shapes_follow_parameters() -> None:
         experimental_parallel_phenomenon_exchange=True,
         experimental_session_clearing_phenomenon_exchange=True,
         experimental_native_stage_math=True,
+        experimental_disable_native_cycle_bridge=True,
         experimental_native_exchange_stage=True,
         experimental_agent_basket_planning=True,
         experimental_local_liquidity_stock_bias=1.5,
@@ -33,6 +40,9 @@ def test_config_shapes_follow_parameters() -> None:
         experimental_aspirational_stock_target=2.0,
         experimental_session_replan_passes=4,
         experimental_session_replan_after_trade=True,
+        experimental_session_disable_replan_cache=True,
+        experimental_session_disable_offer_prefilter=True,
+        experimental_session_pairwise_offer_exhaustion=True,
         experimental_session_candidate_depth=3,
         legacy_price_floor=0.05,
         use_value_price_floor_fraction=0.25,
@@ -57,6 +67,7 @@ def test_config_shapes_follow_parameters() -> None:
     assert config.experimental_parallel_phenomenon_exchange is True
     assert config.experimental_session_clearing_phenomenon_exchange is True
     assert config.experimental_native_stage_math is True
+    assert config.experimental_disable_native_cycle_bridge is True
     assert config.experimental_native_exchange_stage is True
     assert config.experimental_agent_basket_planning is True
     assert config.experimental_local_liquidity_stock_bias == pytest.approx(1.5)
@@ -64,6 +75,9 @@ def test_config_shapes_follow_parameters() -> None:
     assert config.experimental_aspirational_stock_target == pytest.approx(2.0)
     assert config.experimental_session_replan_passes == 4
     assert config.experimental_session_replan_after_trade is True
+    assert config.experimental_session_disable_replan_cache is True
+    assert config.experimental_session_disable_offer_prefilter is True
+    assert config.experimental_session_pairwise_offer_exhaustion is True
     assert config.experimental_session_candidate_depth == 3
     assert config.legacy_price_floor == pytest.approx(0.05)
     assert config.use_value_price_floor_fraction == pytest.approx(0.25)

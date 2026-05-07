@@ -46,6 +46,7 @@ class SimulationConfig:
     max_needs_increase: float = 1.50
     max_needs_reduction: float = 0.70
     small_needs_increase: float = 1.05
+    lifestyle_promotion_threshold: float = 1.05
     small_needs_reduction: float = 0.95
     switch_time: float = 1.0
     min_trade_quantity: float = 0.5
@@ -55,6 +56,9 @@ class SimulationConfig:
     experimental_aspirational_stock_target: float = 0.0
     experimental_session_replan_passes: int = 1
     experimental_session_replan_after_trade: bool = False
+    experimental_session_disable_replan_cache: bool = False
+    experimental_session_disable_offer_prefilter: bool = False
+    experimental_session_pairwise_offer_exhaustion: bool = True
     experimental_session_candidate_depth: int = 1
     cuda_friend_block: int = 12
     cuda_goods_block: int = 25
@@ -69,6 +73,7 @@ class SimulationConfig:
     experimental_parallel_phenomenon_exchange: bool = False
     experimental_session_clearing_phenomenon_exchange: bool = False
     experimental_native_stage_math: bool = False
+    experimental_disable_native_cycle_bridge: bool = False
     experimental_native_exchange_stage: bool = False
     experimental_agent_basket_planning: bool = False
     legacy_extra_demand_round: bool = False
@@ -149,6 +154,8 @@ class SimulationConfig:
             raise ValueError("max_needs_reduction must be in (0, 1]")
         if self.small_needs_increase < 1.0:
             raise ValueError("small_needs_increase must be at least 1")
+        if self.lifestyle_promotion_threshold < self.small_needs_increase:
+            raise ValueError("lifestyle_promotion_threshold must be at least small_needs_increase")
         if not 0.0 < self.small_needs_reduction <= 1.0:
             raise ValueError("small_needs_reduction must be in (0, 1]")
         if self.switch_time < 0.0:

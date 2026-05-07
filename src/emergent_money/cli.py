@@ -54,6 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preferred non-exact phenomenon path: local agents run revalidated barter sessions over known acquaintances.",
     )
     parser.add_argument("--experimental-native-stage-math", action="store_true")
+    parser.add_argument(
+        "--experimental-disable-native-cycle-bridge",
+        action="store_true",
+        help=(
+            "Diagnostic only: keep native stage/search helpers available, but force the Python "
+            "agent loop instead of the full Rust cycle entrypoint."
+        ),
+    )
     parser.add_argument("--experimental-native-exchange-stage", action="store_true")
     parser.add_argument("--experimental-agent-basket-planning", action="store_true")
     parser.add_argument("--experimental-local-liquidity-stock-bias", type=float, default=0.0)
@@ -85,6 +93,40 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--experimental-session-disable-replan-cache",
+        action="store_true",
+        help=(
+            "Diagnostic only: with --experimental-session-replan-after-trade, force a full local "
+            "basket rebuild after each accepted trade instead of using the Rust replan cache."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-session-disable-offer-prefilter",
+        action="store_true",
+        help=(
+            "Diagnostic only: score all offer goods in the local basket search instead of "
+            "pre-filtering goods by the proposer's current surplus stock."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-session-pairwise-offer-exhaustion",
+        action="store_true",
+        help=(
+            "Retained for backwards-compatible scripts. This pairwise behavior is now the default: "
+            "when an offer good is exhausted, forbid only the active need/offer pair instead of "
+            "banning that offer good for every need in the current basket."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-session-global-offer-exhaustion",
+        action="store_true",
+        help=(
+            "Diagnostic only: restore the rejected optimization that bans an exhausted offer good "
+            "for every need in the current basket. This is known to weaken the 3000/100/100 "
+            "per-agent basket dynamics."
+        ),
+    )
+    parser.add_argument(
         "--experimental-session-candidate-depth",
         type=int,
         default=1,
@@ -96,6 +138,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=2009)
     parser.add_argument("--talent-probability", type=float, default=0.20)
     parser.add_argument("--use-value-price-floor-fraction", type=float, default=1.0)
+    parser.add_argument(
+        "--lifestyle-promotion-threshold",
+        type=float,
+        default=1.05,
+        help=(
+            "Stock-level threshold required before applying the small living-standard increase. "
+            "Default 1.05 preserves the legacy small-needs behavior."
+        ),
+    )
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--dashboard-run-dir")
     parser.add_argument("--summarize-run-dir")
@@ -151,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         experimental_parallel_phenomenon_exchange=args.experimental_parallel_phenomenon_exchange,
         experimental_session_clearing_phenomenon_exchange=args.experimental_session_clearing_phenomenon_exchange,
         experimental_native_stage_math=args.experimental_native_stage_math,
+        experimental_disable_native_cycle_bridge=args.experimental_disable_native_cycle_bridge,
         experimental_native_exchange_stage=args.experimental_native_exchange_stage,
         experimental_agent_basket_planning=args.experimental_agent_basket_planning,
         experimental_local_liquidity_stock_bias=args.experimental_local_liquidity_stock_bias,
@@ -158,10 +210,17 @@ def main(argv: list[str] | None = None) -> int:
         experimental_aspirational_stock_target=args.experimental_aspirational_stock_target,
         experimental_session_replan_passes=args.experimental_session_replan_passes,
         experimental_session_replan_after_trade=args.experimental_session_replan_after_trade,
+        experimental_session_disable_replan_cache=args.experimental_session_disable_replan_cache,
+        experimental_session_disable_offer_prefilter=args.experimental_session_disable_offer_prefilter,
+        experimental_session_pairwise_offer_exhaustion=(
+            args.experimental_session_pairwise_offer_exhaustion
+            or not args.experimental_session_global_offer_exhaustion
+        ),
         experimental_session_candidate_depth=args.experimental_session_candidate_depth,
         seed=args.seed,
         talent_probability=args.talent_probability,
         use_value_price_floor_fraction=args.use_value_price_floor_fraction,
+        lifestyle_promotion_threshold=args.lifestyle_promotion_threshold,
     )
     if args.experimental_parallel_phenomenon_exchange:
         print(

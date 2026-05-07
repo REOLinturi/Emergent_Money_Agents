@@ -65,6 +65,28 @@
     }
     .small { color: var(--muted); line-height: 1.45; }
     .meta, .legend { display: flex; flex-wrap: wrap; gap: 10px; }
+    .chart-values {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .chart-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.68);
+      border: 1px solid rgba(33,49,40,0.10);
+      font-family: Consolas, "Lucida Console", monospace;
+    }
+    .chart-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -341,14 +363,16 @@
             <p class="small">Merchant-money shares plus a circulation-and-friction exchange-media approximation.</p>
             <canvas id="moneyChart" width="640" height="240"></canvas>
             <div class="legend small"><span>brown rare share</span><span>gold value rare share</span><span>blue exchange-media rare</span><span>green concentration</span></div>
+            <div id="moneyStats" class="chart-values small"></div>
           </div>
           <div class="chart-card">
             <div class="chart-head"><h3>Exchange-media candidates</h3><button type="button" class="info-button" data-help-key="chart_goods" aria-label="Explain Exchange-media candidates">?</button></div>
             <p class="small">Warm rows belong to the rare-demand quartile.</p>
             <canvas id="goodsChart" width="640" height="240"></canvas>
+            <div id="goodsStats" class="chart-values small"></div>
             <table>
               <thead>
-                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Quantity-based merchant-money score.">Qty score</th><th title="Value-weighted merchant-money score.">Value score</th></tr>
+                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Share of agents holding the good above own consumption scale.">Excess holders</th><th title="Share of agents both buying and selling the good in recent history.">Round trips</th><th title="Share of observed flow handled by agents currently in consumer role for this good. High values look more like final consumption chains than exchange media.">Cons flow</th><th title="Quantity-based merchant-money score.">Qty score</th><th title="Value-weighted merchant-money score.">Value score</th></tr>
               </thead>
               <tbody id="goodsTable"></tbody>
             </table>
@@ -403,6 +427,10 @@
       if (!Number.isFinite(h) || !Number.isFinite(l) || Math.abs(l) < 1e-9) return 'n/a';
       return `${(h / l).toFixed(1)}x`;
     };
+    const chartChip = ({ label, value, color }) => `
+      <span class="chart-chip"><span class="chart-swatch" style="background:${color}"></span>${esc(label)} ${esc(value)}</span>
+    `;
+    const goodLabel = item => `g${item.report_good_id ?? item.good_id}`;
     const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -455,7 +483,7 @@
       chart_welfare: ['Welfare path', 'Achieved living-standard percentiles are shown in baseline-multiplier units. Median tracks typical welfare; p10 shows distress at the lower tail; p90 shows upper-tail gains.'],
       chart_trade: ['Trade pulse', 'Accepted trade volume shows market activity. Inventory trade shows the portion associated with intermediation and stock-building, which may grow before welfare improves.'],
       chart_money: ['Monetary shift', 'Rare-money share shows whether rare goods act as exchange media through merchant-style intermediation. The blue line is a lighter approximation that does not rely on barter direction; it scores broad local circulation, stock over need, and transaction-cost loss relative to need. These aggregates are not visible to agents.'],
-      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Quantity and value merchant-money scores remain as comparison columns.'],
+      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Excess holders and round trips help separate a possible medium of exchange from an ordinary producer-distributor-consumer chain; high consumer flow is a warning that the good may mostly be a final consumption good.'],
       chart_roles: ['Role mix by good', 'This table shows whether goods are mainly produced, consumed, or intermediated, and whether production is concentrated enough to indicate specialization.'],
     };
     const helpButton = (key, label) => helpText[key]
@@ -614,8 +642,6 @@
         { key: 'eta', label: 'ETA', value: duration(progress.eta_seconds), detail: progress.recent_seconds_per_cycle !== null && progress.recent_seconds_per_cycle !== undefined ? `${num(progress.recent_seconds_per_cycle)} s/cycle` : 'throughput unavailable' },
       ].map(item => card({ ...item, valueStyle: 'font-size:1.05rem' })).join('');
 
-      const goodLabel = item => `g${item.report_good_id ?? item.good_id}`;
-
       $('goodsTable').innerHTML = state.goods.map(item => `
         <tr class="${item.is_rare ? 'rare' : ''}">
           <td class="mono">${goodLabel(item)}</td>
@@ -623,6 +649,9 @@
           <td class="mono">${Number(item.exchange_media_score || 0).toFixed(3)}</td>
           <td class="mono">${num(item.relative_tce_loss)}</td>
           <td class="mono">${pct(item.network_circulation_breadth)}</td>
+          <td class="mono">${pct(item.excess_stock_breadth)}</td>
+          <td class="mono">${pct(item.round_trip_breadth)}</td>
+          <td class="mono">${pct(item.consumer_flow_share)}</td>
           <td class="mono">${Number(item.monetary_score || 0).toFixed(3)}</td>
           <td class="mono">${Number(item.value_weighted_monetary_score || 0).toFixed(3)}</td>
         </tr>
@@ -663,6 +692,23 @@
         { values: state.history.map(item => item.rare_goods_exchange_media_share), color: '#4f6f94' },
         { values: state.history.map(item => item.monetary_concentration), color: '#185f49' },
       ]);
+      const latestHistory = state.history[state.history.length - 1] || market;
+      $('moneyStats').innerHTML = [
+        chartChip({ label: 'rare money', value: pct(latestHistory.rare_goods_monetary_share), color: '#844719' }),
+        chartChip({ label: 'value rare', value: pct(latestHistory.value_weighted_rare_goods_monetary_share), color: '#c58b37' }),
+        chartChip({ label: 'exchange-media rare', value: pct(latestHistory.rare_goods_exchange_media_share), color: '#4f6f94' }),
+        chartChip({ label: 'concentration', value: pct(latestHistory.monetary_concentration), color: '#185f49' }),
+      ].join('');
+      const rareCandidateCount = state.goods.filter(item => item.is_rare).length;
+      const commonCandidateCount = Math.max(0, state.goods.length - rareCandidateCount);
+      const topCandidate = state.goods[0];
+      $('goodsStats').innerHTML = [
+        chartChip({ label: 'top', value: topCandidate ? `${goodLabel(topCandidate)} ${Number(topCandidate.exchange_media_score || 0).toFixed(3)}` : 'n/a', color: topCandidate?.is_rare ? '#844719' : '#185f49' }),
+        chartChip({ label: 'excess holders', value: topCandidate ? pct(topCandidate.excess_stock_breadth) : 'n/a', color: '#4f6f94' }),
+        chartChip({ label: 'round trips', value: topCandidate ? pct(topCandidate.round_trip_breadth) : 'n/a', color: '#185f49' }),
+        chartChip({ label: 'rare rows', value: `${rareCandidateCount}/${state.goods.length}`, color: '#844719' }),
+        chartChip({ label: 'common rows', value: String(commonCandidateCount), color: '#185f49' }),
+      ].join('');
       drawBars($('goodsChart'), state.goods);
     }
 
@@ -730,12 +776,19 @@
         ctx.strokeStyle = item.color;
         ctx.lineWidth = 2.3;
         ctx.beginPath();
-        item.values.forEach((value, index) => {
+        const points = item.values.map((value, index) => {
           const x = pad.left + (uw * index) / Math.max(item.values.length - 1, 1);
           const y = pad.top + uh - ((value - min) / span) * uh;
           if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          return { x, y };
         });
         ctx.stroke();
+        points.forEach(point => {
+          ctx.beginPath();
+          ctx.fillStyle = item.color;
+          ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
       });
     }
 

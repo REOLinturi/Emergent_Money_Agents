@@ -27,10 +27,13 @@ def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[st
     periodic_tce_cost = backend.to_numpy(state.market.periodic_tce_cost).astype(np.float64, copy=False)
     purchase_price = backend.to_numpy(state.purchase_price).astype(np.float64, copy=False)
     sales_price = backend.to_numpy(state.sales_price).astype(np.float64, copy=False)
+    stock = backend.to_numpy(state.stock).astype(np.float64, copy=False)
     recent_purchases = backend.to_numpy(state.recent_purchases).astype(np.float64, copy=False)
     recent_sales = backend.to_numpy(state.recent_sales).astype(np.float64, copy=False)
     recent_inventory_inflow = backend.to_numpy(state.recent_inventory_inflow).astype(np.float64, copy=False)
     role = backend.to_numpy(state.role).astype(np.int32, copy=False)
+    needs_level = backend.to_numpy(state.needs_level).astype(np.float64, copy=False)
+    consumer_mask = role == ROLE_CONSUMER
     retailer_mask = role == ROLE_RETAILER
     observed_purchase_value = backend.to_numpy(state.recent_purchase_value).astype(np.float64, copy=False)
     observed_sales_value = backend.to_numpy(state.recent_sales_value).astype(np.float64, copy=False)
@@ -38,6 +41,41 @@ def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[st
     recent_purchase_total = np.sum(recent_purchases, axis=0, dtype=np.float64)
     recent_sales_total = np.sum(recent_sales, axis=0, dtype=np.float64)
     recent_inventory_inflow_total = np.sum(recent_inventory_inflow, axis=0, dtype=np.float64)
+    gross_purchase_breadth = np.mean(recent_purchases > _EPSILON, axis=0, dtype=np.float64)
+    gross_sales_breadth = np.mean(recent_sales > _EPSILON, axis=0, dtype=np.float64)
+    exchange_turnover_balance = np.divide(
+        np.minimum(recent_purchase_total, recent_sales_total),
+        np.maximum(np.maximum(recent_purchase_total, recent_sales_total), _EPSILON),
+        out=np.zeros_like(recent_purchase_total),
+        where=(recent_purchase_total > _EPSILON) | (recent_sales_total > _EPSILON),
+    )
+    round_trip_breadth = np.mean((recent_purchases > _EPSILON) & (recent_sales > _EPSILON), axis=0, dtype=np.float64)
+    round_trip_turnover_share = np.divide(
+        np.sum(np.minimum(recent_purchases, recent_sales), axis=0, dtype=np.float64),
+        np.maximum(np.sum(np.maximum(recent_purchases, recent_sales), axis=0, dtype=np.float64), _EPSILON),
+        out=np.zeros_like(recent_purchase_total),
+        where=(recent_purchase_total > _EPSILON) | (recent_sales_total > _EPSILON),
+    )
+    gross_flow_total = recent_purchase_total + recent_sales_total
+    consumer_flow_total = np.sum(np.where(consumer_mask, recent_purchases + recent_sales, 0.0), axis=0, dtype=np.float64)
+    consumer_flow_share = np.divide(
+        consumer_flow_total,
+        np.maximum(gross_flow_total, _EPSILON),
+        out=np.zeros_like(gross_flow_total),
+        where=gross_flow_total > _EPSILON,
+    )
+    own_need_scale = needs_level[:, None] * elastic_need[None, :]
+    excess_stock = np.maximum(stock - own_need_scale, 0.0)
+    excess_stock_total = np.sum(excess_stock, axis=0, dtype=np.float64)
+    excess_stock_breadth = np.mean(excess_stock > _EPSILON, axis=0, dtype=np.float64)
+    excess_stock_ratio = excess_stock_total / consumption_need_total
+    retailer_stock_total = np.sum(np.where(retailer_mask, stock, 0.0), axis=0, dtype=np.float64)
+    retailer_stock_share = np.divide(
+        retailer_stock_total,
+        np.maximum(stock_total, _EPSILON),
+        out=np.zeros_like(stock_total),
+        where=stock_total > _EPSILON,
+    )
     if float(np.sum(observed_purchase_value, dtype=np.float64)) > _EPSILON:
         purchase_value = observed_purchase_value
         sales_value = observed_sales_value
@@ -141,14 +179,17 @@ def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[st
     tce_loss_salience = _log_salience(relative_tce_loss)
     trade_flow_salience = _log_salience(relative_trade_flow)
     stock_salience = _log_salience(relative_stock)
-    route_breadth = np.maximum(purchase_breadth, 0.25 * network_circulation_breadth)
+    exchange_route_breadth = np.maximum(
+        np.sqrt(np.clip(gross_purchase_breadth, 0.0, 1.0) * np.clip(gross_sales_breadth, 0.0, 1.0)),
+        0.25 * network_circulation_breadth,
+    )
     exchange_media_score = (
         tce_loss_salience
         * np.sqrt(np.clip(trade_flow_salience, 0.0, 1.0))
         * np.sqrt(np.clip(network_circulation_breadth, 0.0, 1.0))
-        * route_breadth
+        * exchange_route_breadth
         * stock_salience
-        * turnover_balance
+        * exchange_turnover_balance
     )
     demand_order = np.argsort(base_need, kind="stable")
     demand_rank = np.empty_like(demand_order)
@@ -186,6 +227,12 @@ def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[st
         "relative_trade_flow": relative_trade_flow,
         "relative_stock": relative_stock,
         "network_circulation_breadth": network_circulation_breadth,
+        "excess_stock_breadth": excess_stock_breadth,
+        "excess_stock_ratio": excess_stock_ratio,
+        "round_trip_breadth": round_trip_breadth,
+        "round_trip_turnover_share": round_trip_turnover_share,
+        "consumer_flow_share": consumer_flow_share,
+        "retailer_stock_share": retailer_stock_share,
         "demand_rank": demand_rank,
         "is_rare": is_rare,
     }
@@ -278,6 +325,12 @@ def compute_good_snapshots(
             relative_trade_flow=float(arrays["relative_trade_flow"][good_id]),
             relative_stock=float(arrays["relative_stock"][good_id]),
             network_circulation_breadth=float(arrays["network_circulation_breadth"][good_id]),
+            excess_stock_breadth=float(arrays["excess_stock_breadth"][good_id]),
+            excess_stock_ratio=float(arrays["excess_stock_ratio"][good_id]),
+            round_trip_breadth=float(arrays["round_trip_breadth"][good_id]),
+            round_trip_turnover_share=float(arrays["round_trip_turnover_share"][good_id]),
+            consumer_flow_share=float(arrays["consumer_flow_share"][good_id]),
+            retailer_stock_share=float(arrays["retailer_stock_share"][good_id]),
         )
         for good_id in range(goods)
     ]
@@ -297,6 +350,12 @@ def compute_good_snapshots(
         "relative_trade_flow",
         "relative_stock",
         "network_circulation_breadth",
+        "excess_stock_breadth",
+        "excess_stock_ratio",
+        "round_trip_breadth",
+        "round_trip_turnover_share",
+        "consumer_flow_share",
+        "retailer_stock_share",
     }
     if sort_by not in valid_sort_keys:
         raise ValueError(f"Unsupported sort field: {sort_by}")

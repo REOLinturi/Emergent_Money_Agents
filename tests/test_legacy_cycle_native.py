@@ -137,6 +137,34 @@ def test_run_legacy_cycle_uses_native_bridge_for_exchange_stage(monkeypatch: pyt
     assert marker['calls'] == 0
 
 
+def test_run_legacy_cycle_can_disable_native_bridge_for_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = _FakeNativeCycleModule()
+    config = SimulationConfig(
+        population=4,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_native_stage_math=True,
+        experimental_agent_basket_planning=True,
+        experimental_disable_native_cycle_bridge=True,
+    )
+    engine = SimulationEngine.create(config=config, backend_name='numpy')
+    marker = {'calls': 0}
+
+    def fake_run(self) -> None:
+        marker['calls'] += 1
+
+    monkeypatch.setattr(legacy_cycle_native, '_load_native_search_module', lambda: fake_module)
+    monkeypatch.setattr(LegacyCycleRunner, 'run', fake_run)
+
+    run_legacy_cycle(engine)
+
+    assert fake_module.calls == 0
+    assert marker['calls'] == 1
+
+
 def test_run_legacy_cycle_keeps_native_bridge_disabled_without_native_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module = _FakeNativeCycleModule()
     config = SimulationConfig(
@@ -187,6 +215,36 @@ def test_agent_basket_planning_uses_whole_native_cycle_bridge(monkeypatch: pytes
 
     assert fake_module.calls == 1
     assert marker['calls'] == 0
+
+
+def test_full_native_agent_basket_cycle_runs_end_to_end() -> None:
+    config = SimulationConfig(
+        population=16,
+        goods=4,
+        acquaintances=4,
+        active_acquaintances=4,
+        demand_candidates=2,
+        supply_candidates=2,
+        seed=2009,
+        experimental_native_stage_math=True,
+        experimental_agent_basket_planning=True,
+        experimental_session_replan_after_trade=False,
+    )
+    engine = SimulationEngine.create(config=config, backend_name='numpy')
+    runner = LegacyCycleRunner(engine)
+    native_backend = _require_native_backend(runner)
+    if not native_backend.supports_run_exact_cycle:
+        pytest.skip('full native cycle is not available in this build')
+
+    snapshot = engine.step()
+
+    assert engine.cycle == 1
+    assert snapshot.production_total > 0.0
+    assert engine._cycle_need_total > 0.0
+    assert snapshot.fulfilled_need_total >= 0.0
+    assert np.isfinite(engine.state.stock).all()
+    assert np.isfinite(engine.state.purchase_price).all()
+    assert np.isfinite(engine.state.sales_price).all()
 
 
 def test_native_agent_basket_planner_returns_active_need_candidate() -> None:

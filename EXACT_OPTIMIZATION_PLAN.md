@@ -25,7 +25,9 @@ For the exact path, the following may not change without an explicit behavioral 
 - transaction-cost waste rule
 - stock-limit, learning, price, and transparency updates
 
-The phenomenon path is separate from this exact path. The deprecated wave-based phenomenon path is retained only for comparison; new non-exact exploratory runs should use the session-clearing phenomenon path, where local-session timing is treated as a realism assumption rather than an exact optimization.
+The phenomenon path is separate from this exact path. The current retained non-exact exploratory branch is the per-agent basket path with Rust-owned after-trade re-planning: `--experimental-agent-basket-planning` plus `--experimental-session-replan-after-trade`, with session clearing disabled. The active agent evaluates its locally visible basket opportunity set, commits one revalidated trade, rebuilds the local plan from the changed state, and only then continues. This keeps the primitive barter timing asymmetry while avoiding stale one-shot shopping lists.
+
+Operational guardrail: keep only two paths as normal work targets. Use the exact path for reference validation and short correctness probes. Use the Rust replan-after-trade per-agent basket path for phenomenon-scale exploratory runs. Static no-replan basket lists, session-clearing, and wave-based variants are historical diagnostics/rollback branches; do not extend or optimize them unless explicitly investigating a named anomaly.
 
 Optimization may change how the same work is executed, but not what work is performed.
 
@@ -661,34 +663,31 @@ Decision rule:
 
 ### Phenomenon Path Status
 
-Status: the old wave-based screening path behind `--experimental-parallel-phenomenon-exchange` is deprecated. It remains available only for comparison and rollback while the session-clearing path is validated.
+Status: keep only the exact path and the Rust replan-after-trade per-agent basket path as normal work targets.
 
 - exact path remains the reference and is not replaced
-- active agents evaluate locally visible exchange opportunities from a read-only wave snapshot
-- Rust/Rayon scores candidate trades across agents and goods before Python conflict scheduling
-- the scheduler commits only conflict-free trades, preserving one concrete decision per agent per wave
-- only the best next proposal per active agent is materialized for the scheduler; this is a full-search reduction, not pre-search opportunity pruning
-- the Python driver must not re-scan every good for every active agent after each surplus wave; the Rust planner is the source of truth for whether an agent can still form an execution-ready proposal. A `3000/100/100` probe showed this Python remaining-need scan consuming most of cycle time, and removing it cut the 7-cycle probe from about `85 s` to about `20 s` without changing accepted trade counts in the probe.
-- default phenomenon settings use a population-wide frontier, no frontier-partner blocking, and both consumption and surplus exchange stages
-- the path automatically uses the native stage-math helpers for preparation, production, leisure, and period-end arithmetic
-- the phenomenon path also uses the isolated Rust `surplus_production` helper when available; the exact path does not opt into this because full strict-cycle parity remains a separate gate
-- current speed boundary: the full phenomenon stage loop can now run inside Rust, including planning, deterministic conflict resolution, and execution of scheduled conflict-free trades. This removes Python wave overhead, but a `3000/100/100` probe still hit `10000` native surplus waves by cycle `15`; cycle `20-25` remains minutes rather than seconds. Further order-of-magnitude gains require reducing the number of sequential market waves, not just moving existing waves across the Python/Rust boundary.
+- the active phenomenon path is `--experimental-agent-basket-planning` plus `--experimental-session-replan-after-trade`, with session clearing disabled
+- the agent's opportunity set is still only its own state, prices, history, and known acquaintances; no global dashboard or market aggregates are exposed
+- after each accepted barter decision, Rust rebuilds the active agent's local opportunity set from the changed state before the next decision
+- stale candidates are skipped by revalidation against current stock, need, price, transparency, and partner capacity
+- pairwise offer exhaustion is part of the active path: if one offered good is exhausted, only the active need/offer pair is invalidated before replanning
+- the path may use native stage-math helpers for preparation, production, leisure, and period-end arithmetic where isolated validation exists
 - selected checkpoints and short windows should still be checked with the exact path before drawing final conclusions
 
-Current preferred realism path:
+Retired or diagnostic-only branches:
 
-- `--experimental-session-clearing-phenomenon-exchange` is the new non-exact phenomenon path
-- active agents first enter the same decision stage, then each local session can clear multiple revalidated barter decisions
-- the agent's opportunity set is still only its own state, prices, history, and known acquaintances; no global dashboard or market aggregates are exposed
-- stale candidates are skipped by revalidation against current stock, need, price, transparency, and partner capacity
-- the current native implementation builds one ranked shopping list per session stage and does not rescan the full local basket after each accepted trade
-- if macro anomalies do not appear, remove the deprecated wave path instead of maintaining both variants
+- `--experimental-parallel-phenomenon-exchange` wave scheduling is deprecated. It remains only for rollback/comparison because it changes timing toward simultaneous snapshot decisions.
+- `--experimental-session-clearing-phenomenon-exchange` is no longer the preferred realism path. It remains only for explicit local-clearing diagnostics because it can over-synchronize the market and weaken price dispersion and merchant margins.
+- Static no-replan per-agent basket lists are no longer the preferred fast branch. The latest 3000/100/100 probe was quick but much weaker macro-economically than the promising 500-cycle per-agent basket artifact.
+- Multi-pass and candidate-depth variants remain stale-list diagnostics unless explicitly promoted by a later validation gate.
+- `--experimental-session-global-offer-exhaustion` is rejected except for named rollback diagnostics. It over-prunes the active basket by banning one exhausted offer good for all needs; the 2026-05-07 A/B probes showed that pairwise exhaustion restored the promising c50 profile while global exhaustion reproduced the weak-growth branch.
 
-Next safe speed target after session-clearing validation:
+Next safe speed target:
 
-- add conflict-free scheduling of independent local sessions
-- keep shared accumulators, especially market TCE by good, as per-session or per-thread deltas and apply them deterministically
-- do not parallelize direct shared writes to inventories, market arrays, prices, or acquaintance tables without explicit disjointness or deterministic reduction
+- reduce the cost of Rust after-trade re-planning without changing the per-agent decision order
+- reuse available-offer and pairwise exhausted-offer information inside the active agent's local planner
+- keep shared accumulators, especially market TCE by good, deterministic
+- postpone CUDA or conflict-free session batching until the Rust replan branch has a validated speed/phenomenon baseline
 
 ### Post-Current-Run Backend Metrics Backlog
 

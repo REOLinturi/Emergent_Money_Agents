@@ -315,6 +315,12 @@ class ArtifactDashboardController:
             "relative_trade_flow",
             "relative_stock",
             "network_circulation_breadth",
+            "excess_stock_breadth",
+            "excess_stock_ratio",
+            "round_trip_breadth",
+            "round_trip_turnover_share",
+            "consumer_flow_share",
+            "retailer_stock_share",
         }
         if sort_by not in valid_sort_keys:
             raise ValueError(f"Unsupported sort field: {sort_by}")
