@@ -9,6 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::time::Instant;
 
 const ROLE_CONSUMER: i32 = 10;
 const ROLE_RETAILER: i32 = 11;
@@ -543,9 +544,7 @@ fn search_best_exchange_all_offer_goods_internal(
 
     let my_need_purchase_price = my_purchase_price[need_good];
     let my_need_is_producer = my_role[need_good] == ROLE_PRODUCER;
-    let cell_count = friend_ids
-        .len()
-        .saturating_mul(available_offer_goods.len());
+    let cell_count = friend_ids.len().saturating_mul(available_offer_goods.len());
     if allow_parallel && cell_count >= PARALLEL_SEARCH_MIN_CELLS {
         return search_best_exchange_all_offer_goods_internal_parallel(
             goods,
@@ -776,7 +775,20 @@ struct BasketCandidate {
     friend_slot: i32,
     friend_id: i32,
     offer_good: i32,
-    order: usize,
+    order: u32,
+}
+
+fn basket_candidate_order(
+    need_good: usize,
+    friend_slot: usize,
+    offer_good: usize,
+    goods: usize,
+    acquaintances: usize,
+) -> u32 {
+    ((need_good * acquaintances) + friend_slot)
+        .saturating_mul(goods)
+        .saturating_add(offer_good)
+        .min(u32::MAX as usize) as u32
 }
 
 #[derive(Clone, Copy)]
@@ -884,15 +896,14 @@ fn plan_exchange_basket(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
-    let available_offer_goods =
-        collect_available_offer_goods(
-            agent_id,
-            goods,
-            elastic_need,
-            stock,
-            needs_level,
-            disable_offer_prefilter,
-        );
+    let available_offer_goods = collect_available_offer_goods(
+        agent_id,
+        goods,
+        elastic_need,
+        stock,
+        needs_level,
+        disable_offer_prefilter,
+    );
     if available_offer_goods.is_empty() {
         return Ok(Vec::new());
     }
@@ -1055,9 +1066,13 @@ fn plan_exchange_basket(
                     transparency,
                 )?;
 
-                let order = ((need_good * acquaintances) + (search_candidate.friend_slot as usize))
-                    .saturating_mul(goods)
-                    + (search_candidate.offer_good as usize);
+                let order = basket_candidate_order(
+                    need_good,
+                    search_candidate.friend_slot as usize,
+                    search_candidate.offer_good as usize,
+                    goods,
+                    acquaintances,
+                );
                 Some(BasketCandidate {
                     score: search_candidate.score,
                     need_good: need_good as i32,
@@ -1281,7 +1296,7 @@ fn plan_agent_parallel_phenomenon_candidates(
                 .saturating_mul(goods)
                 .saturating_mul(acquaintances)
                 .saturating_mul(goods)
-                .saturating_add(candidate.order);
+                .saturating_add(candidate.order as usize);
             candidates.push(ParallelPhenomenonCandidate {
                 score: plan.candidate.score,
                 agent_id: agent_id as i32,
@@ -1481,7 +1496,7 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
                 .saturating_mul(goods)
                 .saturating_mul(acquaintances)
                 .saturating_mul(goods)
-                .saturating_add(candidate.order);
+                .saturating_add(candidate.order as usize);
             candidates.push(ParallelPhenomenonCandidate {
                 score: plan.candidate.score,
                 agent_id: agent_id as i32,
@@ -2314,6 +2329,81 @@ struct NativeStageTotals {
     surplus_output_total: f64,
     stock_consumption_total: f64,
     leisure_extra_need_total: f64,
+}
+
+#[derive(Default)]
+struct BasketProfile {
+    sessions: u64,
+    active_sessions: u64,
+    attempts: u64,
+    proposed: u64,
+    accepted: u64,
+    static_builds: u64,
+    static_index_builds: u64,
+    first_valid_calls: u64,
+    full_plan_calls: u64,
+    max_need_calls: u64,
+    specific_plan_calls: u64,
+    reciprocal_scan_ns: u128,
+    static_build_ns: u128,
+    static_index_ns: u128,
+    first_valid_ns: u128,
+    full_plan_ns: u128,
+    max_need_ns: u128,
+    specific_plan_ns: u128,
+    execute_ns: u128,
+}
+
+impl BasketProfile {
+    fn from_env() -> Option<Self> {
+        match std::env::var("EM_PROFILE_BASKET") {
+            Ok(value) if value != "0" && !value.eq_ignore_ascii_case("false") => {
+                Some(Self::default())
+            }
+            _ => None,
+        }
+    }
+
+    fn ms(ns: u128) -> f64 {
+        ns as f64 / 1_000_000.0
+    }
+
+    fn print(&self, cycle: usize, population: usize, goods: usize, acquaintances: usize) {
+        eprintln!(
+            concat!(
+                "EM_PROFILE_BASKET cycle={} population={} goods={} acquaintances={} ",
+                "sessions={} active_sessions={} attempts={} proposed={} accepted={} ",
+                "static_builds={} static_index_builds={} first_valid_calls={} ",
+                "full_plan_calls={} max_need_calls={} specific_plan_calls={} ",
+                "reciprocal_ms={:.3} static_build_ms={:.3} static_index_ms={:.3} ",
+                "first_valid_ms={:.3} full_plan_ms={:.3} max_need_ms={:.3} ",
+                "specific_plan_ms={:.3} execute_ms={:.3}"
+            ),
+            cycle,
+            population,
+            goods,
+            acquaintances,
+            self.sessions,
+            self.active_sessions,
+            self.attempts,
+            self.proposed,
+            self.accepted,
+            self.static_builds,
+            self.static_index_builds,
+            self.first_valid_calls,
+            self.full_plan_calls,
+            self.max_need_calls,
+            self.specific_plan_calls,
+            Self::ms(self.reciprocal_scan_ns),
+            Self::ms(self.static_build_ns),
+            Self::ms(self.static_index_ns),
+            Self::ms(self.first_valid_ns),
+            Self::ms(self.full_plan_ns),
+            Self::ms(self.max_need_ns),
+            Self::ms(self.specific_plan_ns),
+            Self::ms(self.execute_ns),
+        );
+    }
 }
 
 fn splitmix64_next(state: &mut u64) -> u64 {
@@ -4392,9 +4482,13 @@ fn plan_one_basket_candidate_from_cached_links(
         allow_inner_parallel,
     )?;
 
-    let order = ((need_good * acquaintances) + (search_candidate.friend_slot as usize))
-        .saturating_mul(goods)
-        + (search_candidate.offer_good as usize);
+    let order = basket_candidate_order(
+        need_good,
+        search_candidate.friend_slot as usize,
+        search_candidate.offer_good as usize,
+        goods,
+        acquaintances,
+    );
     Some(BasketCandidate {
         score: search_candidate.score,
         need_good: need_good as i32,
@@ -4515,9 +4609,13 @@ fn plan_need_basket_candidates_from_cached_links(
         {
             break;
         }
-        let order = ((need_good * acquaintances) + (search_candidate.friend_slot as usize))
-            .saturating_mul(goods)
-            + offer_good;
+        let order = basket_candidate_order(
+            need_good,
+            search_candidate.friend_slot as usize,
+            offer_good,
+            goods,
+            acquaintances,
+        );
         candidates.push(BasketCandidate {
             score: search_candidate.score,
             need_good: need_good as i32,
@@ -4588,8 +4686,13 @@ fn build_static_basket_candidate_lists(
                     if score <= 0.0 {
                         continue;
                     }
-                    let order = ((need_good * acquaintances) + friend_slot).saturating_mul(goods)
-                        + offer_good;
+                    let order = basket_candidate_order(
+                        need_good,
+                        friend_slot,
+                        offer_good,
+                        goods,
+                        acquaintances,
+                    );
                     candidates.push(BasketCandidate {
                         score,
                         need_good: need_good as i32,
@@ -4616,12 +4719,20 @@ fn build_static_basket_candidate_indexes(
     static_candidate_lists: &[Vec<BasketCandidate>],
     goods: usize,
     acquaintances: usize,
-) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
-    let mut offer_to_needs: Vec<Vec<usize>> = vec![Vec::new(); goods];
-    let mut offer_friend_to_needs: Vec<Vec<usize>> = vec![Vec::new(); goods * acquaintances];
-    let mut seen_offer_need = vec![false; goods * goods];
+) -> (Vec<u128>, Vec<u128>) {
+    if goods > 128 {
+        let all_needs = u128::MAX;
+        return (
+            vec![all_needs; goods],
+            vec![all_needs; goods.saturating_mul(acquaintances)],
+        );
+    }
+
+    let mut offer_to_needs = vec![0_u128; goods];
+    let mut offer_friend_to_needs = vec![0_u128; goods * acquaintances];
 
     for (need_good, candidates) in static_candidate_lists.iter().enumerate() {
+        let need_mask = 1_u128 << need_good;
         for candidate in candidates {
             if candidate.offer_good < 0 || candidate.friend_slot < 0 {
                 continue;
@@ -4632,17 +4743,61 @@ fn build_static_basket_candidate_indexes(
                 continue;
             }
 
-            let offer_need_index = (offer_good * goods) + need_good;
-            if !seen_offer_need[offer_need_index] {
-                seen_offer_need[offer_need_index] = true;
-                offer_to_needs[offer_good].push(need_good);
-            }
-
-            offer_friend_to_needs[(offer_good * acquaintances) + friend_slot].push(need_good);
+            offer_to_needs[offer_good] |= need_mask;
+            offer_friend_to_needs[(offer_good * acquaintances) + friend_slot] |= need_mask;
         }
     }
 
     (offer_to_needs, offer_friend_to_needs)
+}
+
+fn mark_dirty_need_mask(
+    mask: u128,
+    goods: usize,
+    dirty_needs: &mut [bool],
+    static_candidate_cursors: &mut [usize],
+) {
+    if mask == 0 {
+        return;
+    }
+    let limit = goods
+        .min(dirty_needs.len())
+        .min(static_candidate_cursors.len());
+    if goods > 128 && mask == u128::MAX {
+        for need_good in 0..limit {
+            dirty_needs[need_good] = true;
+            static_candidate_cursors[need_good] = 0;
+        }
+        return;
+    }
+    for need_good in 0..limit.min(128) {
+        if ((mask >> need_good) & 1) != 0 {
+            dirty_needs[need_good] = true;
+            static_candidate_cursors[need_good] = 0;
+        }
+    }
+}
+
+fn clear_cached_need_mask(
+    mask: u128,
+    goods: usize,
+    cached_candidates: &mut [Option<BasketCandidate>],
+) {
+    if mask == 0 {
+        return;
+    }
+    let limit = goods.min(cached_candidates.len());
+    if goods > 128 && mask == u128::MAX {
+        for candidate in cached_candidates.iter_mut().take(limit) {
+            *candidate = None;
+        }
+        return;
+    }
+    for need_good in 0..limit.min(128) {
+        if ((mask >> need_good) & 1) != 0 {
+            cached_candidates[need_good] = None;
+        }
+    }
 }
 
 fn forbid_offer_good_for_all_needs(
@@ -4682,6 +4837,106 @@ fn offer_good_exhausted_for_agent(
     stock[[agent_id, offer_good]] <= (elastic_need[offer_good] * needs_level[agent_id] + 1.0)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_session_availability_cache(
+    agent_id: usize,
+    goods: usize,
+    acquaintances: usize,
+    agent_friend_ids: &[i32],
+    elastic_need: ArrayView1<'_, f32>,
+    stock: ArrayView2<'_, f32>,
+    role: ArrayView2<'_, i32>,
+    stock_limit: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+) -> (Vec<bool>, Vec<bool>, Vec<bool>) {
+    let mut own_offer_available = vec![false; goods];
+    let mut friend_supply_available = vec![false; acquaintances.saturating_mul(goods)];
+    let mut friend_accept_available = vec![false; acquaintances.saturating_mul(goods)];
+    if agent_id >= stock.nrows() {
+        return (
+            own_offer_available,
+            friend_supply_available,
+            friend_accept_available,
+        );
+    }
+
+    let my_needs_level = needs_level[agent_id];
+    for good_id in 0..goods {
+        own_offer_available[good_id] =
+            stock[[agent_id, good_id]] > ((elastic_need[good_id] * my_needs_level) + 1.0);
+    }
+
+    for friend_slot in 0..acquaintances {
+        let Some(friend_id) = agent_friend_ids.get(friend_slot).copied() else {
+            continue;
+        };
+        if friend_id < 0 {
+            continue;
+        }
+        let friend_idx = friend_id as usize;
+        if friend_idx >= stock.nrows() {
+            continue;
+        }
+        let friend_needs_level = needs_level[friend_idx];
+        let base_index = friend_slot * goods;
+        for good_id in 0..goods {
+            friend_supply_available[base_index + good_id] =
+                stock[[friend_idx, good_id]] > ((elastic_need[good_id] * friend_needs_level) + 1.0);
+            let gift_max_level = if role[[friend_idx, good_id]] == ROLE_RETAILER {
+                stock_limit[[friend_idx, good_id]] - 1.0
+            } else {
+                (elastic_need[good_id] * friend_needs_level) - 1.0
+            };
+            friend_accept_available[base_index + good_id] =
+                stock[[friend_idx, good_id]] < gift_max_level;
+        }
+    }
+
+    (
+        own_offer_available,
+        friend_supply_available,
+        friend_accept_available,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_session_availability_good(
+    own_offer_available: &mut [bool],
+    friend_supply_available: &mut [bool],
+    friend_accept_available: &mut [bool],
+    agent_id: usize,
+    friend_slot: usize,
+    friend_idx: usize,
+    good_id: usize,
+    goods: usize,
+    elastic_need: ArrayView1<'_, f32>,
+    stock: ArrayView2<'_, f32>,
+    role: ArrayView2<'_, i32>,
+    stock_limit: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+) {
+    if good_id >= goods || agent_id >= stock.nrows() || friend_idx >= stock.nrows() {
+        return;
+    }
+    own_offer_available[good_id] =
+        stock[[agent_id, good_id]] > ((elastic_need[good_id] * needs_level[agent_id]) + 1.0);
+
+    if friend_slot < friend_supply_available.len().saturating_div(goods.max(1)) {
+        let friend_needs_level = needs_level[friend_idx];
+        let index = (friend_slot * goods) + good_id;
+        if index < friend_supply_available.len() && index < friend_accept_available.len() {
+            friend_supply_available[index] =
+                stock[[friend_idx, good_id]] > ((elastic_need[good_id] * friend_needs_level) + 1.0);
+            let gift_max_level = if role[[friend_idx, good_id]] == ROLE_RETAILER {
+                stock_limit[[friend_idx, good_id]] - 1.0
+            } else {
+                (elastic_need[good_id] * friend_needs_level) - 1.0
+            };
+            friend_accept_available[index] = stock[[friend_idx, good_id]] < gift_max_level;
+        }
+    }
+}
+
 fn collect_available_offer_goods(
     agent_id: usize,
     goods: usize,
@@ -4711,18 +4966,17 @@ fn collect_available_offer_goods(
 
 #[allow(clippy::too_many_arguments)]
 fn first_valid_static_basket_candidate(
-    agent_id: usize,
+    _agent_id: usize,
     need_good: usize,
     goods: usize,
     start_index: usize,
     forbidden_offer_by_need: &[bool],
     static_candidates: &[BasketCandidate],
-    elastic_need: ArrayView1<'_, f32>,
+    _elastic_need: ArrayView1<'_, f32>,
     stock: ArrayView2<'_, f32>,
-    role: ArrayView2<'_, i32>,
-    stock_limit: ArrayView2<'_, f32>,
-    needs_level: ArrayView1<'_, f32>,
-    my_needs_level: f32,
+    own_offer_available: &[bool],
+    friend_supply_available: &[bool],
+    friend_accept_available: &[bool],
 ) -> Option<(BasketCandidate, usize)> {
     for (candidate_index, candidate) in static_candidates.iter().enumerate().skip(start_index) {
         if candidate.offer_good < 0 || candidate.friend_id < 0 {
@@ -4736,19 +4990,16 @@ fn first_valid_static_basket_candidate(
         {
             continue;
         }
-        let friend_needs_level = needs_level[friend_idx];
-        if stock[[friend_idx, need_good]] <= (elastic_need[need_good] * friend_needs_level + 1.0) {
+        if offer_good >= own_offer_available.len() || !own_offer_available[offer_good] {
             continue;
         }
-        if stock[[agent_id, offer_good]] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
-            continue;
-        }
-        let gift_max_level = if role[[friend_idx, offer_good]] == ROLE_RETAILER {
-            stock_limit[[friend_idx, offer_good]] - 1.0
-        } else {
-            elastic_need[offer_good] * friend_needs_level - 1.0
-        };
-        if stock[[friend_idx, offer_good]] >= gift_max_level {
+        let supply_index = (candidate.friend_slot as usize).saturating_mul(goods) + need_good;
+        let accept_index = (candidate.friend_slot as usize).saturating_mul(goods) + offer_good;
+        if supply_index >= friend_supply_available.len()
+            || accept_index >= friend_accept_available.len()
+            || !friend_supply_available[supply_index]
+            || !friend_accept_available[accept_index]
+        {
             continue;
         }
         return Some((*candidate, candidate_index));
@@ -6849,9 +7100,13 @@ fn run_basket_session_internal(
     accepted_quantity: &mut ArrayViewMut1<'_, f32>,
     changed_agents: &mut HashSet<usize>,
     totals: &mut ExchangeStageTotals,
+    mut profile: Option<&mut BasketProfile>,
 ) -> bool {
     if agent_id >= stock.nrows() || goods == 0 || acquaintances == 0 {
         return false;
+    }
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.sessions += 1;
     }
 
     let proposed_before = totals.proposed_count;
@@ -6861,6 +7116,7 @@ fn run_basket_session_internal(
         .collect();
     let mut reciprocal_slots = vec![-1_i32; acquaintances];
     let mut has_known_partner = false;
+    let reciprocal_scan_start = profile.as_ref().map(|_| Instant::now());
     for friend_slot in 0..acquaintances {
         let fid = agent_friend_ids[friend_slot];
         if fid >= 0 {
@@ -6869,23 +7125,32 @@ fn run_basket_session_internal(
                 find_friend_slot_scan_internal(friend_id.view(), fid as usize, agent_id as i32);
         }
     }
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), reciprocal_scan_start) {
+        profile.reciprocal_scan_ns += start.elapsed().as_nanos();
+    }
     if !has_known_partner {
         return false;
     }
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.active_sessions += 1;
+    }
 
-    let use_replan_cache =
-        replan_after_each_trade && candidate_depth == 1 && !disable_replan_cache;
+    let use_replan_cache = replan_after_each_trade && candidate_depth == 1 && !disable_replan_cache;
     let mut cached_candidates: Vec<Option<BasketCandidate>> = vec![None; goods];
     let mut dirty_needs: Vec<bool> = vec![true; goods];
     let mut static_candidate_cursors: Vec<usize> = vec![0; goods];
     let mut static_candidate_lists: Option<Vec<Vec<BasketCandidate>>> = None;
-    let mut static_offer_to_needs: Option<Vec<Vec<usize>>> = None;
-    let mut static_offer_friend_to_needs: Option<Vec<Vec<usize>>> = None;
+    let mut static_offer_to_needs: Option<Vec<u128>> = None;
+    let mut static_offer_friend_to_needs: Option<Vec<u128>> = None;
+    let mut own_offer_available: Option<Vec<bool>> = None;
+    let mut friend_supply_available: Option<Vec<bool>> = None;
+    let mut friend_accept_available: Option<Vec<bool>> = None;
     let mut attempts = 0usize;
     while attempts < max_attempts {
         let candidates = if use_replan_cache {
             let dirty_count = dirty_needs.iter().filter(|is_dirty| **is_dirty).count();
             if attempts > 0 && static_candidate_lists.is_none() {
+                let static_build_start = profile.as_ref().map(|_| Instant::now());
                 static_candidate_lists = Some(build_static_basket_candidate_lists(
                     agent_id,
                     goods,
@@ -6898,22 +7163,48 @@ fn run_basket_session_internal(
                     ArrayView1::from(&agent_friend_ids[..]),
                     ArrayView1::from(&reciprocal_slots[..]),
                 ));
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), static_build_start) {
+                    profile.static_builds += 1;
+                    profile.static_build_ns += start.elapsed().as_nanos();
+                }
                 let static_candidate_lists_ref = static_candidate_lists.as_ref().unwrap();
-                let (offer_to_needs, offer_friend_to_needs) =
-                    build_static_basket_candidate_indexes(
-                        static_candidate_lists_ref,
-                        goods,
-                        acquaintances,
-                    );
+                let static_index_start = profile.as_ref().map(|_| Instant::now());
+                let (offer_to_needs, offer_friend_to_needs) = build_static_basket_candidate_indexes(
+                    static_candidate_lists_ref,
+                    goods,
+                    acquaintances,
+                );
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), static_index_start) {
+                    profile.static_index_builds += 1;
+                    profile.static_index_ns += start.elapsed().as_nanos();
+                }
                 static_offer_to_needs = Some(offer_to_needs);
                 static_offer_friend_to_needs = Some(offer_friend_to_needs);
+                if own_offer_available.is_none() {
+                    let (own_available, supply_available, accept_available) =
+                        build_session_availability_cache(
+                            agent_id,
+                            goods,
+                            acquaintances,
+                            &agent_friend_ids,
+                            elastic_need,
+                            stock.view(),
+                            role,
+                            stock_limit,
+                            needs_level,
+                        );
+                    own_offer_available = Some(own_available);
+                    friend_supply_available = Some(supply_available);
+                    friend_accept_available = Some(accept_available);
+                }
             }
             if let Some(static_candidate_lists_ref) = static_candidate_lists.as_ref() {
                 for need_good in 0..goods {
                     if !dirty_needs[need_good] {
                         continue;
                     }
-                    cached_candidates[need_good] = if basket_stage_max_need(
+                    let max_need_start = profile.as_ref().map(|_| Instant::now());
+                    let max_need = basket_stage_max_need(
                         agent_id,
                         need_good,
                         deal_type,
@@ -6933,11 +7224,16 @@ fn run_basket_session_internal(
                         friend_id.view(),
                         friend_sold.view(),
                         transparency.view(),
-                    ) <= 0.0
-                    {
+                    );
+                    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), max_need_start) {
+                        profile.max_need_calls += 1;
+                        profile.max_need_ns += start.elapsed().as_nanos();
+                    }
+                    cached_candidates[need_good] = if max_need <= 0.0 {
                         None
                     } else {
                         let start_index = static_candidate_cursors[need_good];
+                        let first_valid_start = profile.as_ref().map(|_| Instant::now());
                         let result = first_valid_static_basket_candidate(
                             agent_id,
                             need_good,
@@ -6947,11 +7243,16 @@ fn run_basket_session_internal(
                             &static_candidate_lists_ref[need_good],
                             elastic_need,
                             stock.view(),
-                            role,
-                            stock_limit,
-                            needs_level,
-                            needs_level[agent_id],
+                            own_offer_available.as_deref().unwrap_or(&[]),
+                            friend_supply_available.as_deref().unwrap_or(&[]),
+                            friend_accept_available.as_deref().unwrap_or(&[]),
                         );
+                        if let (Some(profile), Some(start)) =
+                            (profile.as_deref_mut(), first_valid_start)
+                        {
+                            profile.first_valid_calls += 1;
+                            profile.first_valid_ns += start.elapsed().as_nanos();
+                        }
                         match result {
                             Some((candidate, candidate_index)) => {
                                 static_candidate_cursors[need_good] = candidate_index;
@@ -6968,6 +7269,7 @@ fn run_basket_session_internal(
                 }
             } else if dirty_count > goods.saturating_div(4).max(1) {
                 cached_candidates.fill(None);
+                let full_plan_start = profile.as_ref().map(|_| Instant::now());
                 let full_candidates = plan_agent_basket_candidates_from_cached_links(
                     agent_id,
                     deal_type,
@@ -6999,6 +7301,10 @@ fn run_basket_session_internal(
                     candidate_depth,
                     disable_offer_prefilter,
                 );
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), full_plan_start) {
+                    profile.full_plan_calls += 1;
+                    profile.full_plan_ns += start.elapsed().as_nanos();
+                }
                 for candidate in full_candidates {
                     if candidate.need_good >= 0 {
                         let need_good = candidate.need_good as usize;
@@ -7009,6 +7315,7 @@ fn run_basket_session_internal(
                 }
                 dirty_needs.fill(false);
             } else {
+                let static_build_start = profile.as_ref().map(|_| Instant::now());
                 static_candidate_lists = Some(build_static_basket_candidate_lists(
                     agent_id,
                     goods,
@@ -7021,20 +7328,46 @@ fn run_basket_session_internal(
                     ArrayView1::from(&agent_friend_ids[..]),
                     ArrayView1::from(&reciprocal_slots[..]),
                 ));
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), static_build_start) {
+                    profile.static_builds += 1;
+                    profile.static_build_ns += start.elapsed().as_nanos();
+                }
                 let static_candidate_lists_ref = static_candidate_lists.as_ref().unwrap();
-                let (offer_to_needs, offer_friend_to_needs) =
-                    build_static_basket_candidate_indexes(
-                        static_candidate_lists_ref,
-                        goods,
-                        acquaintances,
-                    );
+                let static_index_start = profile.as_ref().map(|_| Instant::now());
+                let (offer_to_needs, offer_friend_to_needs) = build_static_basket_candidate_indexes(
+                    static_candidate_lists_ref,
+                    goods,
+                    acquaintances,
+                );
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), static_index_start) {
+                    profile.static_index_builds += 1;
+                    profile.static_index_ns += start.elapsed().as_nanos();
+                }
                 static_offer_to_needs = Some(offer_to_needs);
                 static_offer_friend_to_needs = Some(offer_friend_to_needs);
+                if own_offer_available.is_none() {
+                    let (own_available, supply_available, accept_available) =
+                        build_session_availability_cache(
+                            agent_id,
+                            goods,
+                            acquaintances,
+                            &agent_friend_ids,
+                            elastic_need,
+                            stock.view(),
+                            role,
+                            stock_limit,
+                            needs_level,
+                        );
+                    own_offer_available = Some(own_available);
+                    friend_supply_available = Some(supply_available);
+                    friend_accept_available = Some(accept_available);
+                }
                 for need_good in 0..goods {
                     if !dirty_needs[need_good] {
                         continue;
                     }
-                    cached_candidates[need_good] = if basket_stage_max_need(
+                    let max_need_start = profile.as_ref().map(|_| Instant::now());
+                    let max_need = basket_stage_max_need(
                         agent_id,
                         need_good,
                         deal_type,
@@ -7054,11 +7387,16 @@ fn run_basket_session_internal(
                         friend_id.view(),
                         friend_sold.view(),
                         transparency.view(),
-                    ) <= 0.0
-                    {
+                    );
+                    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), max_need_start) {
+                        profile.max_need_calls += 1;
+                        profile.max_need_ns += start.elapsed().as_nanos();
+                    }
+                    cached_candidates[need_good] = if max_need <= 0.0 {
                         None
                     } else {
                         let start_index = static_candidate_cursors[need_good];
+                        let first_valid_start = profile.as_ref().map(|_| Instant::now());
                         let result = first_valid_static_basket_candidate(
                             agent_id,
                             need_good,
@@ -7068,11 +7406,16 @@ fn run_basket_session_internal(
                             &static_candidate_lists_ref[need_good],
                             elastic_need,
                             stock.view(),
-                            role,
-                            stock_limit,
-                            needs_level,
-                            needs_level[agent_id],
+                            own_offer_available.as_deref().unwrap_or(&[]),
+                            friend_supply_available.as_deref().unwrap_or(&[]),
+                            friend_accept_available.as_deref().unwrap_or(&[]),
                         );
+                        if let (Some(profile), Some(start)) =
+                            (profile.as_deref_mut(), first_valid_start)
+                        {
+                            profile.first_valid_calls += 1;
+                            profile.first_valid_ns += start.elapsed().as_nanos();
+                        }
                         match result {
                             Some((candidate, candidate_index)) => {
                                 static_candidate_cursors[need_good] = candidate_index;
@@ -7099,7 +7442,8 @@ fn run_basket_session_internal(
             }
             best_candidate.into_iter().collect()
         } else {
-            plan_agent_basket_candidates_from_cached_links(
+            let full_plan_start = profile.as_ref().map(|_| Instant::now());
+            let planned_candidates = plan_agent_basket_candidates_from_cached_links(
                 agent_id,
                 deal_type,
                 goods,
@@ -7129,7 +7473,12 @@ fn run_basket_session_internal(
                 friend_sold.view(),
                 candidate_depth,
                 disable_offer_prefilter,
-            )
+            );
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), full_plan_start) {
+                profile.full_plan_calls += 1;
+                profile.full_plan_ns += start.elapsed().as_nanos();
+            }
+            planned_candidates
         };
         if candidates.is_empty() {
             break;
@@ -7155,6 +7504,7 @@ fn run_basket_session_internal(
                 continue;
             }
 
+            let max_need_start = profile.as_ref().map(|_| Instant::now());
             let max_need = basket_stage_max_need(
                 agent_id,
                 need_good,
@@ -7176,6 +7526,10 @@ fn run_basket_session_internal(
                 friend_sold.view(),
                 transparency.view(),
             );
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), max_need_start) {
+                profile.max_need_calls += 1;
+                profile.max_need_ns += start.elapsed().as_nanos();
+            }
             if max_need <= 0.0 {
                 if use_replan_cache {
                     cached_candidates[need_good] = None;
@@ -7187,6 +7541,10 @@ fn run_basket_session_internal(
 
             processed_candidate = true;
             totals.proposed_count += 1;
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.proposed += 1;
+            }
+            let specific_plan_start = profile.as_ref().map(|_| Instant::now());
             let plan = plan_specific_exchange_candidate(
                 agent_id,
                 need_good,
@@ -7206,6 +7564,11 @@ fn run_basket_session_internal(
                 candidate,
             );
             attempts += 1;
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), specific_plan_start) {
+                profile.attempts += 1;
+                profile.specific_plan_calls += 1;
+                profile.specific_plan_ns += start.elapsed().as_nanos();
+            }
 
             let Some(plan) = plan else {
                 if !forbidden_offer_by_need[forbidden_index] {
@@ -7230,6 +7593,7 @@ fn run_basket_session_internal(
                 continue;
             }
 
+            let execute_start = profile.as_ref().map(|_| Instant::now());
             let friend_idx = plan.candidate.friend_id as usize;
             let friend_slot = plan.candidate.friend_slot as usize;
             let reciprocal_slot = if plan.candidate.reciprocal_slot >= 0 {
@@ -7401,7 +7765,47 @@ fn run_basket_session_internal(
 
             totals.accepted_count += 1;
             totals.accepted_volume += max_exchange;
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.accepted += 1;
+            }
             executed_any = true;
+
+            if let (Some(own_available), Some(supply_available), Some(accept_available)) = (
+                own_offer_available.as_mut(),
+                friend_supply_available.as_mut(),
+                friend_accept_available.as_mut(),
+            ) {
+                refresh_session_availability_good(
+                    own_available,
+                    supply_available,
+                    accept_available,
+                    agent_id,
+                    friend_slot,
+                    friend_idx,
+                    offer_good,
+                    goods,
+                    elastic_need,
+                    stock.view(),
+                    role,
+                    stock_limit,
+                    needs_level,
+                );
+                refresh_session_availability_good(
+                    own_available,
+                    supply_available,
+                    accept_available,
+                    agent_id,
+                    friend_slot,
+                    friend_idx,
+                    need_good,
+                    goods,
+                    elastic_need,
+                    stock.view(),
+                    role,
+                    stock_limit,
+                    needs_level,
+                );
+            }
 
             let exhausted_gift =
                 remaining_need_after_trade >= 1.0 && stock[[agent_id, offer_good]] < 1.0;
@@ -7413,21 +7817,19 @@ fn run_basket_session_internal(
                 needs_level,
             );
             if exhausted_offer_good && !pairwise_offer_exhaustion {
-                if forbid_offer_good_for_all_needs(
-                    &mut forbidden_offer_by_need,
-                    goods,
-                    offer_good,
-                ) {
+                if forbid_offer_good_for_all_needs(&mut forbidden_offer_by_need, goods, offer_good)
+                {
                     changed_forbidden = true;
                     if use_replan_cache {
                         if let Some(offer_to_needs) = static_offer_to_needs.as_ref() {
-                            for indexed_need in &offer_to_needs[offer_good] {
-                                if *indexed_need < dirty_needs.len() {
-                                    dirty_needs[*indexed_need] = true;
-                                    static_candidate_cursors[*indexed_need] = 0;
-                                    cached_candidates[*indexed_need] = None;
-                                }
-                            }
+                            let mask = offer_to_needs[offer_good];
+                            mark_dirty_need_mask(
+                                mask,
+                                goods,
+                                &mut dirty_needs,
+                                &mut static_candidate_cursors,
+                            );
+                            clear_cached_need_mask(mask, goods, &mut cached_candidates);
                         } else {
                             dirty_needs.fill(true);
                             static_candidate_cursors.fill(0);
@@ -7441,16 +7843,6 @@ fn run_basket_session_internal(
             }
             if use_replan_cache {
                 let mut dirty_all = false;
-                let mark_indexed_dirty = |needs_to_mark: &[usize],
-                                          dirty_needs: &mut [bool],
-                                          static_candidate_cursors: &mut [usize]| {
-                    for indexed_need in needs_to_mark {
-                        if *indexed_need < dirty_needs.len() {
-                            dirty_needs[*indexed_need] = true;
-                            static_candidate_cursors[*indexed_need] = 0;
-                        }
-                    }
-                };
                 if deal_type == SURPLUS_DEAL {
                     let own_offer_threshold =
                         (elastic_need[need_good] * needs_level[agent_id]) + 1.0;
@@ -7458,8 +7850,9 @@ fn run_basket_session_internal(
                         && stock[[agent_id, need_good]] > own_offer_threshold
                     {
                         if let Some(offer_to_needs) = static_offer_to_needs.as_ref() {
-                            mark_indexed_dirty(
-                                &offer_to_needs[need_good],
+                            mark_dirty_need_mask(
+                                offer_to_needs[need_good],
+                                goods,
                                 &mut dirty_needs,
                                 &mut static_candidate_cursors,
                             );
@@ -7478,8 +7871,9 @@ fn run_basket_session_internal(
                 {
                     if let Some(offer_friend_to_needs) = static_offer_friend_to_needs.as_ref() {
                         let index = (need_good * acquaintances) + friend_slot;
-                        mark_indexed_dirty(
-                            &offer_friend_to_needs[index],
+                        mark_dirty_need_mask(
+                            offer_friend_to_needs[index],
+                            goods,
                             &mut dirty_needs,
                             &mut static_candidate_cursors,
                         );
@@ -7517,6 +7911,9 @@ fn run_basket_session_internal(
                 }
                 cached_candidates[need_good] = None;
                 cached_candidates[offer_good] = None;
+            }
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), execute_start) {
+                profile.execute_ns += start.elapsed().as_nanos();
             }
             if replan_after_each_trade {
                 break;
@@ -7759,6 +8156,7 @@ fn run_phenomenon_session_stage(
                 &mut accepted_quantity,
                 &mut changed_agents,
                 &mut totals,
+                None,
             ) {
                 agent_had_session = true;
             }
@@ -8254,12 +8652,13 @@ fn run_agent_basket_exchange_stage(
                     remaining_need_after_trade >= 1.0 && stock[[agent_id, offer_good]] < 1.0;
                 if !session_pairwise_offer_exhaustion
                     && offer_good_exhausted_for_agent(
-                    agent_id,
-                    offer_good,
-                    elastic_need,
-                    stock.view(),
-                    needs_level,
-                ) {
+                        agent_id,
+                        offer_good,
+                        elastic_need,
+                        stock.view(),
+                        needs_level,
+                    )
+                {
                     if forbid_offer_good_for_all_needs(
                         &mut forbidden_offer_by_need,
                         goods,
@@ -8520,6 +8919,7 @@ fn run_full_native_agent_basket_cycle(
     let mut totals = NativeStageTotals::default();
     let mut exchange_totals = ExchangeStageTotals::default();
     let mut changed_agents: HashSet<usize> = HashSet::new();
+    let mut basket_profile = BasketProfile::from_env();
 
     for agent_id in 0..population {
         let (cycle_need_total, stock_consumed_total) = prepare_agent_for_consumption_internal(
@@ -8611,6 +9011,9 @@ fn run_full_native_agent_basket_cycle(
             &mut accepted_quantity,
             &mut changed_agents,
             &mut exchange_totals,
+            basket_profile
+                .as_mut()
+                .map(|profile| profile as &mut BasketProfile),
         );
 
         let produced_need_total = produce_need_internal(
@@ -8730,6 +9133,9 @@ fn run_full_native_agent_basket_cycle(
             &mut accepted_quantity,
             &mut changed_agents,
             &mut exchange_totals,
+            basket_profile
+                .as_mut()
+                .map(|profile| profile as &mut BasketProfile),
         );
 
         period_time_debt[agent_id] += time_remaining[agent_id];
@@ -8832,6 +9238,9 @@ fn run_full_native_agent_basket_cycle(
         exchange_totals.accepted_volume,
         exchange_totals.inventory_trade_volume,
     )?;
+    if let Some(profile) = basket_profile.as_ref() {
+        profile.print(cycle, population, goods, acquaintances);
+    }
     Ok(())
 }
 
