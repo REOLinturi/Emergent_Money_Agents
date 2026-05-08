@@ -37,10 +37,10 @@ After the 2026-05-08 Rust hot-path pass, the same accepted per-agent basket
 semantics are retained but the mature c500 continuation is faster:
 
 - c500 -> c501 before this pass: about `39.7 s`
-- c500 -> c501 after this pass: `25.5-26.1 s` in repeated measurements
-- c500 -> c505 in-memory continuation after this pass: `128.4 s`, about
-  `25.7 s/cycle`
-- conservative mature-state speedup: about `1.55x` versus the same c500
+- c500 -> c501 after this pass: `24.7-24.8 s` in repeated measurements
+- c500 -> c505 in-memory continuation after this pass: `122.8 s`, about
+  `24.6 s/cycle`
+- conservative mature-state speedup: about `1.62x` versus the same c500
   one-cycle checkpoint measurement
 
 The implemented speedups are semantics-preserving data-structure changes:
@@ -52,6 +52,8 @@ The implemented speedups are semantics-preserving data-structure changes:
   retained 3000/100/100 scale and keeps the same ordering there
 - static candidate lists omit the redundant `need_good` field; the need is
   restored when a static candidate is selected
+- static candidate lists also omit the redundant `friend_id` field; the friend
+  is restored from the stable per-session friend slot
 
 Set `EM_PROFILE_BASKET=1` before running a checkpoint continuation to print
 Rust-side timing counters for the per-agent basket path.

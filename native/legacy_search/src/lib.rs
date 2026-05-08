@@ -782,18 +782,17 @@ struct BasketCandidate {
 struct StaticBasketCandidate {
     score: f32,
     friend_slot: i32,
-    friend_id: i32,
     offer_good: i32,
     order: u32,
 }
 
 impl StaticBasketCandidate {
-    fn with_need_good(self, need_good: usize) -> BasketCandidate {
+    fn with_need_good(self, need_good: usize, friend_id: i32) -> BasketCandidate {
         BasketCandidate {
             score: self.score,
             need_good: need_good as i32,
             friend_slot: self.friend_slot,
-            friend_id: self.friend_id,
+            friend_id,
             offer_good: self.offer_good,
             order: self.order,
         }
@@ -4718,7 +4717,6 @@ fn build_static_basket_candidate_lists(
                     candidates.push(StaticBasketCandidate {
                         score,
                         friend_slot: friend_slot as i32,
-                        friend_id,
                         offer_good: offer_good as i32,
                         order,
                     });
@@ -4993,6 +4991,7 @@ fn first_valid_static_basket_candidate(
     start_index: usize,
     forbidden_offer_by_need: &[bool],
     static_candidates: &[StaticBasketCandidate],
+    agent_friend_ids: &[i32],
     _elastic_need: ArrayView1<'_, f32>,
     stock: ArrayView2<'_, f32>,
     own_offer_available: &[bool],
@@ -5000,11 +4999,18 @@ fn first_valid_static_basket_candidate(
     friend_accept_available: &[bool],
 ) -> Option<(BasketCandidate, usize)> {
     for (candidate_index, candidate) in static_candidates.iter().enumerate().skip(start_index) {
-        if candidate.offer_good < 0 || candidate.friend_id < 0 {
+        if candidate.offer_good < 0 || candidate.friend_slot < 0 {
             continue;
         }
         let offer_good = candidate.offer_good as usize;
-        let friend_idx = candidate.friend_id as usize;
+        let friend_slot = candidate.friend_slot as usize;
+        let Some(friend_id) = agent_friend_ids.get(friend_slot).copied() else {
+            continue;
+        };
+        if friend_id < 0 {
+            continue;
+        }
+        let friend_idx = friend_id as usize;
         if offer_good == need_good
             || friend_idx >= stock.nrows()
             || forbidden_offer_by_need[(need_good * goods) + offer_good]
@@ -5023,7 +5029,10 @@ fn first_valid_static_basket_candidate(
         {
             continue;
         }
-        return Some((candidate.with_need_good(need_good), candidate_index));
+        return Some((
+            candidate.with_need_good(need_good, friend_id),
+            candidate_index,
+        ));
     }
     None
 }
@@ -7262,6 +7271,7 @@ fn run_basket_session_internal(
                             start_index,
                             &forbidden_offer_by_need,
                             &static_candidate_lists_ref[need_good],
+                            &agent_friend_ids,
                             elastic_need,
                             stock.view(),
                             own_offer_available.as_deref().unwrap_or(&[]),
@@ -7425,6 +7435,7 @@ fn run_basket_session_internal(
                             start_index,
                             &forbidden_offer_by_need,
                             &static_candidate_lists_ref[need_good],
+                            &agent_friend_ids,
                             elastic_need,
                             stock.view(),
                             own_offer_available.as_deref().unwrap_or(&[]),
