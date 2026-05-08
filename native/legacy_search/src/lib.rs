@@ -778,6 +778,28 @@ struct BasketCandidate {
     order: u32,
 }
 
+#[derive(Clone, Copy)]
+struct StaticBasketCandidate {
+    score: f32,
+    friend_slot: i32,
+    friend_id: i32,
+    offer_good: i32,
+    order: u32,
+}
+
+impl StaticBasketCandidate {
+    fn with_need_good(self, need_good: usize) -> BasketCandidate {
+        BasketCandidate {
+            score: self.score,
+            need_good: need_good as i32,
+            friend_slot: self.friend_slot,
+            friend_id: self.friend_id,
+            offer_good: self.offer_good,
+            order: self.order,
+        }
+    }
+}
+
 fn basket_candidate_order(
     need_good: usize,
     friend_slot: usize,
@@ -4641,7 +4663,7 @@ fn build_static_basket_candidate_lists(
     transparency: ArrayView3<'_, f32>,
     friend_ids_row: ArrayView1<'_, i32>,
     reciprocal_slots_view: ArrayView1<'_, i32>,
-) -> Vec<Vec<BasketCandidate>> {
+) -> Vec<Vec<StaticBasketCandidate>> {
     let my_sales_price = sales_price.row(agent_id);
     let my_purchase_price = purchase_price.row(agent_id);
     let my_role = role.row(agent_id);
@@ -4693,9 +4715,8 @@ fn build_static_basket_candidate_lists(
                         goods,
                         acquaintances,
                     );
-                    candidates.push(BasketCandidate {
+                    candidates.push(StaticBasketCandidate {
                         score,
-                        need_good: need_good as i32,
                         friend_slot: friend_slot as i32,
                         friend_id,
                         offer_good: offer_good as i32,
@@ -4716,7 +4737,7 @@ fn build_static_basket_candidate_lists(
 }
 
 fn build_static_basket_candidate_indexes(
-    static_candidate_lists: &[Vec<BasketCandidate>],
+    static_candidate_lists: &[Vec<StaticBasketCandidate>],
     goods: usize,
     acquaintances: usize,
 ) -> (Vec<u128>, Vec<u128>) {
@@ -4971,7 +4992,7 @@ fn first_valid_static_basket_candidate(
     goods: usize,
     start_index: usize,
     forbidden_offer_by_need: &[bool],
-    static_candidates: &[BasketCandidate],
+    static_candidates: &[StaticBasketCandidate],
     _elastic_need: ArrayView1<'_, f32>,
     stock: ArrayView2<'_, f32>,
     own_offer_available: &[bool],
@@ -5002,7 +5023,7 @@ fn first_valid_static_basket_candidate(
         {
             continue;
         }
-        return Some((*candidate, candidate_index));
+        return Some((candidate.with_need_good(need_good), candidate_index));
     }
     None
 }
@@ -7139,7 +7160,7 @@ fn run_basket_session_internal(
     let mut cached_candidates: Vec<Option<BasketCandidate>> = vec![None; goods];
     let mut dirty_needs: Vec<bool> = vec![true; goods];
     let mut static_candidate_cursors: Vec<usize> = vec![0; goods];
-    let mut static_candidate_lists: Option<Vec<Vec<BasketCandidate>>> = None;
+    let mut static_candidate_lists: Option<Vec<Vec<StaticBasketCandidate>>> = None;
     let mut static_offer_to_needs: Option<Vec<u128>> = None;
     let mut static_offer_friend_to_needs: Option<Vec<u128>> = None;
     let mut own_offer_available: Option<Vec<bool>> = None;
