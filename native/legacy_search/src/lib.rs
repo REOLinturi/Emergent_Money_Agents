@@ -4985,52 +4985,40 @@ fn collect_available_offer_goods(
 
 #[allow(clippy::too_many_arguments)]
 fn first_valid_static_basket_candidate(
-    _agent_id: usize,
     need_good: usize,
     goods: usize,
     start_index: usize,
-    forbidden_offer_by_need: &[bool],
+    forbidden_offer_row: &[bool],
     static_candidates: &[StaticBasketCandidate],
     agent_friend_ids: &[i32],
-    _elastic_need: ArrayView1<'_, f32>,
-    stock: ArrayView2<'_, f32>,
     own_offer_available: &[bool],
     friend_supply_available: &[bool],
     friend_accept_available: &[bool],
 ) -> Option<(BasketCandidate, usize)> {
+    if forbidden_offer_row.len() < goods
+        || own_offer_available.len() < goods
+        || friend_supply_available.len() < agent_friend_ids.len().saturating_mul(goods)
+        || friend_accept_available.len() < agent_friend_ids.len().saturating_mul(goods)
+    {
+        return None;
+    }
     for (candidate_index, candidate) in static_candidates.iter().enumerate().skip(start_index) {
-        if candidate.offer_good < 0 || candidate.friend_slot < 0 {
-            continue;
-        }
         let offer_good = candidate.offer_good as usize;
         let friend_slot = candidate.friend_slot as usize;
-        let Some(friend_id) = agent_friend_ids.get(friend_slot).copied() else {
-            continue;
-        };
-        if friend_id < 0 {
+        if forbidden_offer_row[offer_good] {
             continue;
         }
-        let friend_idx = friend_id as usize;
-        if offer_good == need_good
-            || friend_idx >= stock.nrows()
-            || forbidden_offer_by_need[(need_good * goods) + offer_good]
-        {
+        if !own_offer_available[offer_good] {
             continue;
         }
-        if offer_good >= own_offer_available.len() || !own_offer_available[offer_good] {
-            continue;
-        }
-        let supply_index = (candidate.friend_slot as usize).saturating_mul(goods) + need_good;
-        let accept_index = (candidate.friend_slot as usize).saturating_mul(goods) + offer_good;
-        if supply_index >= friend_supply_available.len()
-            || accept_index >= friend_accept_available.len()
-            || !friend_supply_available[supply_index]
-            || !friend_accept_available[accept_index]
+        let friend_base = friend_slot * goods;
+        if !friend_supply_available[friend_base + need_good]
+            || !friend_accept_available[friend_base + offer_good]
         {
             continue;
         }
         return Some((
-            candidate.with_need_good(need_good, friend_id),
+            candidate.with_need_good(need_good, agent_friend_ids[friend_slot]),
             candidate_index,
         ));
     }
@@ -7263,17 +7251,17 @@ fn run_basket_session_internal(
                         None
                     } else {
                         let start_index = static_candidate_cursors[need_good];
+                        let forbidden_row_start = need_good * goods;
+                        let forbidden_offer_row = &forbidden_offer_by_need
+                            [forbidden_row_start..forbidden_row_start + goods];
                         let first_valid_start = profile.as_ref().map(|_| Instant::now());
                         let result = first_valid_static_basket_candidate(
-                            agent_id,
                             need_good,
                             goods,
                             start_index,
-                            &forbidden_offer_by_need,
+                            forbidden_offer_row,
                             &static_candidate_lists_ref[need_good],
                             &agent_friend_ids,
-                            elastic_need,
-                            stock.view(),
                             own_offer_available.as_deref().unwrap_or(&[]),
                             friend_supply_available.as_deref().unwrap_or(&[]),
                             friend_accept_available.as_deref().unwrap_or(&[]),
@@ -7427,17 +7415,17 @@ fn run_basket_session_internal(
                         None
                     } else {
                         let start_index = static_candidate_cursors[need_good];
+                        let forbidden_row_start = need_good * goods;
+                        let forbidden_offer_row = &forbidden_offer_by_need
+                            [forbidden_row_start..forbidden_row_start + goods];
                         let first_valid_start = profile.as_ref().map(|_| Instant::now());
                         let result = first_valid_static_basket_candidate(
-                            agent_id,
                             need_good,
                             goods,
                             start_index,
-                            &forbidden_offer_by_need,
+                            forbidden_offer_row,
                             &static_candidate_lists_ref[need_good],
                             &agent_friend_ids,
-                            elastic_need,
-                            stock.view(),
                             own_offer_available.as_deref().unwrap_or(&[]),
                             friend_supply_available.as_deref().unwrap_or(&[]),
                             friend_accept_available.as_deref().unwrap_or(&[]),

@@ -54,6 +54,17 @@ The implemented speedups are semantics-preserving data-structure changes:
   restored when a static candidate is selected
 - static candidate lists also omit the redundant `friend_id` field; the friend
   is restored from the stable per-session friend slot
+- `first_valid_static_basket_candidate` now receives the pre-sliced forbidden
+  offer row and relies on invariants already guaranteed when the static
+  candidate list is built; this removes redundant checks in the multi-million
+  call validation loop without changing candidate order or acceptance logic
+
+The 2026-05-08 `first_valid` cleanup preserved the c500 -> c501 reference
+metrics exactly in the printed market summary. In a profiled c500 continuation,
+`first_valid_ms` fell to about `7.9 s`, versus roughly `9.6-10.1 s` in earlier
+profiles. The wall-clock benchmark from the same afternoon is not a clean speed
+anchor because the laptop CPU was concurrently loaded by a Zoom meeting; use the
+profiled hot-path reduction and exact metric parity as the acceptance evidence.
 
 Set `EM_PROFILE_BASKET=1` before running a checkpoint continuation to print
 Rust-side timing counters for the per-agent basket path.
