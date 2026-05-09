@@ -321,6 +321,14 @@ class ArtifactDashboardController:
             "round_trip_turnover_share",
             "consumer_flow_share",
             "retailer_stock_share",
+            "local_liquidity_score",
+            "local_liquidity_acceptance_breadth",
+            "local_liquidity_visible_acceptance",
+            "local_liquidity_target_increment",
+            "exchange_media_reserve_score",
+            "exchange_media_reserve_scale",
+            "exchange_media_reserve_gap",
+            "exchange_media_spread_ok_share",
         }
         if sort_by not in valid_sort_keys:
             raise ValueError(f"Unsupported sort field: {sort_by}")
@@ -454,6 +462,7 @@ class ArtifactDashboardController:
             self._goods = compute_good_snapshots(
                 state=engine.state,
                 backend=engine.backend,
+                config=engine.config,
                 limit=None,
             )
             self._role_goods = compute_role_snapshots(

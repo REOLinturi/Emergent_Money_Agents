@@ -76,6 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--experimental-exchange-media-reserve-bias",
+        type=float,
+        default=0.0,
+        help=(
+            "Phenomenon-path surplus heuristic: raise stock targets for goods that the active "
+            "agent locally observes as useful exchange media; 0 disables it."
+        ),
+    )
+    parser.add_argument("--experimental-exchange-media-reserve-min-acceptance", type=float, default=0.01)
+    parser.add_argument("--experimental-exchange-media-reserve-bootstrap-floor", type=float, default=1.0)
+    parser.add_argument(
         "--experimental-session-replan-passes",
         type=int,
         default=1,
@@ -208,6 +219,9 @@ def main(argv: list[str] | None = None) -> int:
         experimental_local_liquidity_stock_bias=args.experimental_local_liquidity_stock_bias,
         experimental_local_liquidity_min_sales=args.experimental_local_liquidity_min_sales,
         experimental_aspirational_stock_target=args.experimental_aspirational_stock_target,
+        experimental_exchange_media_reserve_bias=args.experimental_exchange_media_reserve_bias,
+        experimental_exchange_media_reserve_min_acceptance=args.experimental_exchange_media_reserve_min_acceptance,
+        experimental_exchange_media_reserve_bootstrap_floor=args.experimental_exchange_media_reserve_bootstrap_floor,
         experimental_session_replan_passes=args.experimental_session_replan_passes,
         experimental_session_replan_after_trade=args.experimental_session_replan_after_trade,
         experimental_session_disable_replan_cache=args.experimental_session_disable_replan_cache,

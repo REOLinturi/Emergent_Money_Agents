@@ -15,7 +15,11 @@ from .state import ROLE_CONSUMER, ROLE_PRODUCER, ROLE_RETAILER, SimulationState
 _EPSILON = 1e-6
 
 
-def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[str, np.ndarray]:
+def _good_metric_arrays(
+    state: SimulationState,
+    backend: BaseBackend,
+    config: SimulationConfig | None = None,
+) -> dict[str, np.ndarray]:
     xp = backend.xp
     base_need = backend.to_numpy(state.base_need[0]).astype(np.float64, copy=False)
     report_good_id = _report_good_ids_from_base_need(base_need)
@@ -165,6 +169,32 @@ def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[st
     friend_purchased = backend.to_numpy(state.friend_purchased).astype(np.float64, copy=False)
     friend_sold = backend.to_numpy(state.friend_sold).astype(np.float64, copy=False)
     friend_id = backend.to_numpy(state.friend_id)
+    local_liquidity = _local_liquidity_diagnostic_arrays(
+        friend_id=friend_id,
+        friend_sold=friend_sold,
+        transparency=backend.to_numpy(state.transparency).astype(np.float64, copy=False),
+        recent_sales=recent_sales,
+        recent_purchases=recent_purchases,
+        recent_inventory_inflow=recent_inventory_inflow,
+        recent_production=backend.to_numpy(state.recent_production).astype(np.float64, copy=False),
+        purchase_price=purchase_price,
+        sales_price=sales_price,
+        stock=stock,
+        stock_limit=backend.to_numpy(state.stock_limit).astype(np.float64, copy=False),
+        base_need=base_need,
+        needs_level=needs_level,
+        history=int(config.history if config is not None else 4),
+        min_acceptance=float(
+            config.experimental_exchange_media_reserve_min_acceptance
+            if config is not None
+            else 2.0
+        ),
+        reserve_bootstrap_floor=float(
+            config.experimental_exchange_media_reserve_bootstrap_floor
+            if config is not None
+            else 1.0
+        ),
+    )
     if friend_purchased.ndim == 3 and friend_sold.ndim == 3 and friend_id.ndim == 2:
         known_friend = friend_id >= 0
         friend_activity = (friend_purchased > _EPSILON) | (friend_sold > _EPSILON)
@@ -233,8 +263,131 @@ def _good_metric_arrays(state: SimulationState, backend: BaseBackend) -> dict[st
         "round_trip_turnover_share": round_trip_turnover_share,
         "consumer_flow_share": consumer_flow_share,
         "retailer_stock_share": retailer_stock_share,
+        **local_liquidity,
         "demand_rank": demand_rank,
         "is_rare": is_rare,
+    }
+
+
+def _local_liquidity_diagnostic_arrays(
+    *,
+    friend_id: np.ndarray,
+    friend_sold: np.ndarray,
+    transparency: np.ndarray,
+    recent_sales: np.ndarray,
+    recent_purchases: np.ndarray,
+    recent_inventory_inflow: np.ndarray,
+    recent_production: np.ndarray,
+    purchase_price: np.ndarray,
+    sales_price: np.ndarray,
+    stock: np.ndarray,
+    stock_limit: np.ndarray,
+    base_need: np.ndarray,
+    needs_level: np.ndarray,
+    history: int,
+    min_acceptance: float = 2.0,
+    reserve_bootstrap_floor: float = 1.0,
+) -> dict[str, np.ndarray]:
+    goods = recent_sales.shape[1]
+    zeros = np.zeros((goods,), dtype=np.float64)
+    if friend_id.ndim != 2 or friend_sold.ndim != 3 or transparency.ndim != 3:
+        return {
+            "local_liquidity_score": zeros,
+            "local_liquidity_acceptance_breadth": zeros,
+            "local_liquidity_visible_acceptance": zeros,
+            "local_liquidity_target_increment": zeros,
+            "exchange_media_reserve_score": zeros,
+            "exchange_media_reserve_scale": zeros,
+            "exchange_media_reserve_gap": zeros,
+            "exchange_media_spread_ok_share": zeros,
+        }
+
+    known_friend = friend_id >= 0
+    known_count = np.sum(known_friend, axis=1, dtype=np.float64)[:, None]
+    visible_sold = np.where(known_friend[:, :, None], friend_sold, 0.0)
+    visible_acceptance = np.sum(visible_sold, axis=1, dtype=np.float64)
+    accepting_count = np.sum(visible_sold > _EPSILON, axis=1, dtype=np.float64)
+    acceptance_breadth = np.divide(
+        accepting_count,
+        np.maximum(known_count, 1.0),
+        out=np.zeros_like(visible_acceptance),
+        where=known_count > 0,
+    )
+    accepting_mask = visible_sold > _EPSILON
+    transparency_sum = np.sum(np.where(accepting_mask, transparency, 0.0), axis=1, dtype=np.float64)
+    transparency_mean = np.divide(
+        transparency_sum,
+        np.maximum(accepting_count, 1.0),
+        out=np.zeros_like(visible_acceptance),
+        where=accepting_count > 0,
+    )
+    own_sales = recent_sales
+    own_sources = recent_purchases + recent_inventory_inflow + recent_production
+    own_turnover = np.minimum(own_sales, own_sources)
+    turnover_score = np.divide(
+        own_turnover,
+        np.maximum(np.maximum(own_sales, own_sources), _EPSILON),
+        out=np.ones_like(own_sales),
+        where=(own_sales > _EPSILON) | (own_sources > _EPSILON),
+    )
+    volume_scale = max(float(min_acceptance) * float(max(history, 1)), 1.0)
+    volume_score = np.clip(visible_acceptance / volume_scale, 0.0, 1.0)
+    active_signal = (known_count > 0) & (visible_acceptance >= float(min_acceptance)) & (acceptance_breadth > _EPSILON)
+    local_score_by_agent = np.where(
+        active_signal,
+        transparency_mean
+        * np.sqrt(np.clip(acceptance_breadth, 0.0, 1.0))
+        * np.maximum(turnover_score, 0.25)
+        * volume_score,
+        0.0,
+    )
+    local_stock_scale = np.maximum(
+        np.maximum(np.minimum(recent_sales, recent_purchases + recent_inventory_inflow), visible_acceptance),
+        np.full_like(visible_acceptance, max(float(min_acceptance), 1.0)),
+    )
+    local_target_increment = local_stock_scale * local_score_by_agent
+
+    spread_ok = purchase_price <= sales_price + _EPSILON
+    own_need_scale = np.maximum(needs_level[:, None] * base_need[None, :], _EPSILON)
+    local_need_window = np.maximum(own_need_scale * np.maximum(known_count, 1.0) * float(max(history, 1)), _EPSILON)
+    need_normalized_acceptance = visible_acceptance / local_need_window
+    reserve_volume_score = np.clip(
+        need_normalized_acceptance / max(float(min_acceptance), _EPSILON),
+        0.0,
+        1.0,
+    )
+    reserve_active_signal = (
+        (known_count > 0)
+        & (need_normalized_acceptance >= float(min_acceptance))
+        & (acceptance_breadth > _EPSILON)
+    )
+    reserve_score_by_agent = np.where(
+        spread_ok & reserve_active_signal,
+        transparency_mean
+        * np.sqrt(np.clip(acceptance_breadth, 0.0, 1.0))
+        * np.maximum(turnover_score, 0.25)
+        * reserve_volume_score,
+        0.0,
+    )
+    own_exchange_budget = np.sum(recent_purchases + recent_inventory_inflow, axis=1, dtype=np.float64)[:, None]
+    own_exchange_budget_per_good = own_exchange_budget / max(goods, 1)
+    local_flow_per_partner = np.maximum(visible_acceptance, own_turnover) / np.maximum(known_count, 1.0)
+    reserve_scale = np.maximum(
+        np.maximum(local_flow_per_partner, own_exchange_budget_per_good * acceptance_breadth),
+        own_need_scale * max(float(reserve_bootstrap_floor), 0.0),
+    )
+    reserve_increment = reserve_scale * reserve_score_by_agent
+    reserve_gap = np.maximum(reserve_increment - np.maximum(stock - stock_limit, 0.0), 0.0)
+
+    return {
+        "local_liquidity_score": np.mean(local_score_by_agent, axis=0, dtype=np.float64),
+        "local_liquidity_acceptance_breadth": np.mean(acceptance_breadth, axis=0, dtype=np.float64),
+        "local_liquidity_visible_acceptance": np.sum(visible_acceptance, axis=0, dtype=np.float64),
+        "local_liquidity_target_increment": np.sum(local_target_increment, axis=0, dtype=np.float64),
+        "exchange_media_reserve_score": np.mean(reserve_score_by_agent, axis=0, dtype=np.float64),
+        "exchange_media_reserve_scale": np.sum(reserve_scale * reserve_score_by_agent, axis=0, dtype=np.float64),
+        "exchange_media_reserve_gap": np.sum(reserve_gap, axis=0, dtype=np.float64),
+        "exchange_media_spread_ok_share": np.mean(spread_ok, axis=0, dtype=np.float64),
     }
 
 
@@ -295,10 +448,11 @@ def compute_good_snapshots(
     *,
     state: SimulationState,
     backend: BaseBackend,
+    config: SimulationConfig | None = None,
     limit: int | None = None,
     sort_by: str = "monetary_score",
 ) -> list[GoodSnapshot]:
-    arrays = _good_metric_arrays(state, backend)
+    arrays = _good_metric_arrays(state, backend, config)
     goods = arrays["base_need"].size
     snapshots = [
         GoodSnapshot(
@@ -331,6 +485,14 @@ def compute_good_snapshots(
             round_trip_turnover_share=float(arrays["round_trip_turnover_share"][good_id]),
             consumer_flow_share=float(arrays["consumer_flow_share"][good_id]),
             retailer_stock_share=float(arrays["retailer_stock_share"][good_id]),
+            local_liquidity_score=float(arrays["local_liquidity_score"][good_id]),
+            local_liquidity_acceptance_breadth=float(arrays["local_liquidity_acceptance_breadth"][good_id]),
+            local_liquidity_visible_acceptance=float(arrays["local_liquidity_visible_acceptance"][good_id]),
+            local_liquidity_target_increment=float(arrays["local_liquidity_target_increment"][good_id]),
+            exchange_media_reserve_score=float(arrays["exchange_media_reserve_score"][good_id]),
+            exchange_media_reserve_scale=float(arrays["exchange_media_reserve_scale"][good_id]),
+            exchange_media_reserve_gap=float(arrays["exchange_media_reserve_gap"][good_id]),
+            exchange_media_spread_ok_share=float(arrays["exchange_media_spread_ok_share"][good_id]),
         )
         for good_id in range(goods)
     ]
@@ -356,6 +518,14 @@ def compute_good_snapshots(
         "round_trip_turnover_share",
         "consumer_flow_share",
         "retailer_stock_share",
+        "local_liquidity_score",
+        "local_liquidity_acceptance_breadth",
+        "local_liquidity_visible_acceptance",
+        "local_liquidity_target_increment",
+        "exchange_media_reserve_score",
+        "exchange_media_reserve_scale",
+        "exchange_media_reserve_gap",
+        "exchange_media_spread_ok_share",
     }
     if sort_by not in valid_sort_keys:
         raise ValueError(f"Unsupported sort field: {sort_by}")

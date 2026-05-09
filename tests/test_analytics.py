@@ -139,3 +139,80 @@ def test_exchange_media_score_does_not_require_retailer_role() -> None:
     assert goods[0].exchange_media_score > 0.0
     assert goods[0].consumer_flow_share == 1.0
     assert goods[0].round_trip_turnover_share > 0.0
+
+
+def test_local_liquidity_reserve_diagnostics_require_local_friend_evidence() -> None:
+    config = SimulationConfig(
+        population=4,
+        goods=2,
+        acquaintances=2,
+        active_acquaintances=2,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_exchange_media_reserve_min_acceptance=1.0,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+
+    state.friend_id[...] = 0
+    state.friend_sold[...] = 0.0
+    state.transparency[...] = 1.0
+    state.recent_purchases[...] = 0.0
+    state.recent_sales[...] = 0.0
+    state.recent_inventory_inflow[...] = 0.0
+    state.recent_production[...] = 0.0
+    state.purchase_price[...] = 1.0
+    state.sales_price[...] = 1.0
+
+    # Global-looking own flow alone is not enough: the reserve diagnostic must
+    # be activated by directly observed friend acceptance.
+    state.recent_purchases[:, 0] = 100.0
+    state.recent_sales[:, 0] = 90.0
+    goods_without_local_evidence = {
+        item.good_id: item
+        for item in compute_good_snapshots(state=state, backend=engine.backend, config=config, limit=None)
+    }
+    assert goods_without_local_evidence[0].local_liquidity_score == 0.0
+    assert goods_without_local_evidence[0].exchange_media_reserve_score == 0.0
+
+    state.friend_sold[:, 0, 0] = 10.0
+    goods_with_local_evidence = {
+        item.good_id: item
+        for item in compute_good_snapshots(state=state, backend=engine.backend, config=config, limit=None)
+    }
+
+    assert goods_with_local_evidence[0].local_liquidity_score > 0.0
+    assert goods_with_local_evidence[0].local_liquidity_acceptance_breadth > 0.0
+    assert goods_with_local_evidence[0].local_liquidity_visible_acceptance > 0.0
+    assert goods_with_local_evidence[0].exchange_media_reserve_score > 0.0
+    assert goods_with_local_evidence[0].exchange_media_reserve_gap > 0.0
+
+
+def test_exchange_media_reserve_diagnostic_obeys_spread_gate() -> None:
+    config = SimulationConfig(
+        population=4,
+        goods=1,
+        acquaintances=2,
+        active_acquaintances=2,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_exchange_media_reserve_min_acceptance=1.0,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+
+    state.friend_id[...] = 0
+    state.friend_sold[:, 0, 0] = 10.0
+    state.transparency[...] = 1.0
+    state.recent_purchases[:, 0] = 10.0
+    state.recent_sales[:, 0] = 8.0
+    state.recent_inventory_inflow[:, 0] = 10.0
+    state.recent_production[:, 0] = 0.0
+    state.purchase_price[:, 0] = 2.0
+    state.sales_price[:, 0] = 1.0
+
+    goods = compute_good_snapshots(state=state, backend=engine.backend, config=config, limit=None)
+
+    assert goods[0].local_liquidity_score > 0.0
+    assert goods[0].exchange_media_reserve_score == 0.0
+    assert goods[0].exchange_media_spread_ok_share == 0.0

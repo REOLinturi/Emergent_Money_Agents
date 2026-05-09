@@ -91,6 +91,7 @@ class SimulationService:
         return compute_good_snapshots(
             state=self.engine.state,
             backend=self.engine.backend,
+            config=self.engine.config,
             limit=limit,
             sort_by=sort_by,
         )

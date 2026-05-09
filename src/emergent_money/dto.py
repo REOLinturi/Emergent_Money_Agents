@@ -231,6 +231,14 @@ class GoodSnapshot:
     round_trip_turnover_share: float = 0.0
     consumer_flow_share: float = 0.0
     retailer_stock_share: float = 0.0
+    local_liquidity_score: float = 0.0
+    local_liquidity_acceptance_breadth: float = 0.0
+    local_liquidity_visible_acceptance: float = 0.0
+    local_liquidity_target_increment: float = 0.0
+    exchange_media_reserve_score: float = 0.0
+    exchange_media_reserve_scale: float = 0.0
+    exchange_media_reserve_gap: float = 0.0
+    exchange_media_spread_ok_share: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)

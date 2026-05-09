@@ -105,7 +105,7 @@ def run_long_simulation(
     runtime_seconds = time.perf_counter() - started_at
     latest_metrics = engine.history[-1] if engine.history else engine.snapshot_metrics()
     latest_market = MarketSnapshot.from_metrics(MetricsSnapshot(**_metrics_payload(latest_metrics, engine)))
-    goods = compute_good_snapshots(state=engine.state, backend=engine.backend, limit=top_goods)
+    goods = compute_good_snapshots(state=engine.state, backend=engine.backend, config=engine.config, limit=top_goods)
     phenomena = analyze_history(engine.history, goods)
 
     summary = {

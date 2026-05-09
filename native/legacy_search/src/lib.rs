@@ -841,8 +841,12 @@ fn plan_exchange_basket(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     disable_offer_prefilter: bool,
     market_elastic_need: PyReadonlyArray1<'_, f32>,
+    base_need: PyReadonlyArray2<'_, f32>,
     forbidden_offer_by_need: PyReadonlyArray2<'_, bool>,
     stock: PyReadonlyArray2<'_, f32>,
     role: PyReadonlyArray2<'_, i32>,
@@ -866,6 +870,7 @@ fn plan_exchange_basket(
     }
 
     let elastic_need = market_elastic_need.as_array();
+    let base_need = base_need.as_array();
     let forbidden_offer_by_need = forbidden_offer_by_need.as_array();
     let stock = stock.as_array();
     let role = role.as_array();
@@ -950,9 +955,13 @@ fn plan_exchange_basket(
                         local_liquidity_stock_bias,
                         local_liquidity_min_sales,
                         aspirational_stock_target,
+                        exchange_media_reserve_bias,
+                        exchange_media_reserve_min_acceptance,
+                        exchange_media_reserve_bootstrap_floor,
                         forbidden_offer_slice,
                         &available_offer_goods,
                         elastic_need,
+                        base_need,
                         stock,
                         role,
                         stock_limit,
@@ -993,9 +1002,13 @@ fn plan_exchange_basket(
                         local_liquidity_stock_bias,
                         local_liquidity_min_sales,
                         aspirational_stock_target,
+                        exchange_media_reserve_bias,
+                        exchange_media_reserve_min_acceptance,
+                        exchange_media_reserve_bootstrap_floor,
                         forbidden_offer_slice,
                         &available_offer_goods,
                         elastic_need,
+                        base_need,
                         stock,
                         role,
                         stock_limit,
@@ -1034,9 +1047,15 @@ fn plan_exchange_basket(
                     local_liquidity_stock_bias,
                     local_liquidity_min_sales,
                     aspirational_stock_target,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
                     elastic_need,
+                    base_need,
                     stock,
                     stock_limit,
+                    purchase_price,
+                    sales_price,
                     needs_level,
                     need,
                     recent_sales,
@@ -1141,10 +1160,14 @@ fn plan_agent_parallel_phenomenon_candidates(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     min_trade_quantity: f64,
     trade_rounding_buffer: f64,
     blocked_partner_mask: &[bool],
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -1215,9 +1238,15 @@ fn plan_agent_parallel_phenomenon_candidates(
             local_liquidity_stock_bias,
             local_liquidity_min_sales,
             aspirational_stock_target,
+            exchange_media_reserve_bias,
+            exchange_media_reserve_min_acceptance,
+            exchange_media_reserve_bootstrap_floor,
             elastic_need,
+            base_need,
             stock,
             stock_limit,
+            purchase_price,
+            sales_price,
             needs_level,
             need,
             recent_sales,
@@ -1245,9 +1274,13 @@ fn plan_agent_parallel_phenomenon_candidates(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 &forbidden_offer_by_need,
                 &available_offer_goods,
                 elastic_need,
+                base_need,
                 stock,
                 role,
                 stock_limit,
@@ -1363,9 +1396,13 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     min_trade_quantity: f64,
     trade_rounding_buffer: f64,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -1415,9 +1452,15 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
             local_liquidity_stock_bias,
             local_liquidity_min_sales,
             aspirational_stock_target,
+            exchange_media_reserve_bias,
+            exchange_media_reserve_min_acceptance,
+            exchange_media_reserve_bootstrap_floor,
             elastic_need,
+            base_need,
             stock,
             stock_limit,
+            purchase_price,
+            sales_price,
             needs_level,
             need,
             recent_sales,
@@ -1445,9 +1488,13 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 &forbidden_offer_by_need,
                 &available_offer_goods,
                 elastic_need,
+                base_need,
                 stock,
                 role,
                 stock_limit,
@@ -1561,11 +1608,15 @@ fn plan_parallel_phenomenon_candidates(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     min_trade_quantity: f64,
     trade_rounding_buffer: f64,
     proposer_ids: PyReadonlyArray1<'_, i32>,
     blocked_partner_ids: PyReadonlyArray1<'_, i32>,
     market_elastic_need: PyReadonlyArray1<'_, f32>,
+    base_need: PyReadonlyArray2<'_, f32>,
     stock: PyReadonlyArray2<'_, f32>,
     role: PyReadonlyArray2<'_, i32>,
     stock_limit: PyReadonlyArray2<'_, f32>,
@@ -1591,6 +1642,7 @@ fn plan_parallel_phenomenon_candidates(
     let proposer_ids = proposer_ids.as_array();
     let blocked_partner_ids = blocked_partner_ids.as_array();
     let elastic_need = market_elastic_need.as_array();
+    let base_need = base_need.as_array();
     let stock = stock.as_array();
     let role = role.as_array();
     let stock_limit = stock_limit.as_array();
@@ -1661,10 +1713,14 @@ fn plan_parallel_phenomenon_candidates(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 min_trade_quantity,
                 trade_rounding_buffer,
                 &blocked_partner_mask,
                 elastic_need,
+                base_need,
                 stock,
                 role,
                 stock_limit,
@@ -3980,9 +4036,15 @@ fn basket_stage_max_need(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     stock_limit: ArrayView2<'_, f32>,
+    purchase_price: ArrayView2<'_, f32>,
+    sales_price: ArrayView2<'_, f32>,
     needs_level: ArrayView1<'_, f32>,
     need: ArrayView2<'_, f32>,
     recent_sales: ArrayView2<'_, f32>,
@@ -4021,6 +4083,26 @@ fn basket_stage_max_need(
         friend_sold,
         transparency,
     );
+    let exchange_media_reserve_target = exchange_media_reserve_target_stock_limit(
+        agent_id,
+        need_good,
+        history,
+        exchange_media_reserve_bias,
+        exchange_media_reserve_min_acceptance,
+        exchange_media_reserve_bootstrap_floor,
+        base_need,
+        needs_level,
+        stock_limit,
+        purchase_price,
+        sales_price,
+        recent_sales,
+        recent_purchases,
+        recent_inventory_inflow,
+        recent_production,
+        friend_id,
+        friend_sold,
+        transparency,
+    );
     let aspirational_target = aspirational_stock_target_for_good(
         agent_id,
         need_good,
@@ -4029,7 +4111,9 @@ fn basket_stage_max_need(
         stock_limit,
         needs_level,
     );
-    let target_stock_limit = base_target_stock_limit.max(aspirational_target);
+    let target_stock_limit = base_target_stock_limit
+        .max(aspirational_target)
+        .max(exchange_media_reserve_target);
     let legacy_surplus_signal = recent_sales[[agent_id, need_good]]
         > (recent_production[[agent_id, need_good]] - elastic_need[need_good]);
     let local_liquidity_signal =
@@ -4117,6 +4201,200 @@ fn surplus_target_stock_limit(
         return base_limit;
     }
     base_limit + (local_liquidity_stock_bias * stock_scale * liquidity_score)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_media_reserve_target_stock_limit(
+    agent_id: usize,
+    good_id: usize,
+    history: i32,
+    reserve_bias: f64,
+    reserve_min_acceptance: f64,
+    reserve_bootstrap_floor: f64,
+    base_need: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    stock_limit: ArrayView2<'_, f32>,
+    purchase_price: ArrayView2<'_, f32>,
+    sales_price: ArrayView2<'_, f32>,
+    recent_sales: ArrayView2<'_, f32>,
+    recent_purchases: ArrayView2<'_, f32>,
+    recent_inventory_inflow: ArrayView2<'_, f32>,
+    recent_production: ArrayView2<'_, f32>,
+    friend_id: ArrayView2<'_, i32>,
+    friend_sold: ArrayView3<'_, f32>,
+    transparency: ArrayView3<'_, f32>,
+) -> f64 {
+    let base_limit = stock_limit[[agent_id, good_id]] as f64;
+    if reserve_bias <= EPSILON as f64 {
+        return base_limit;
+    }
+    if (purchase_price[[agent_id, good_id]] as f64)
+        > (sales_price[[agent_id, good_id]] as f64) + (EPSILON as f64)
+    {
+        return base_limit;
+    }
+    let reserve_score = exchange_media_reserve_score(
+        agent_id,
+        good_id,
+        history,
+        reserve_min_acceptance,
+        base_need,
+        needs_level,
+        recent_sales,
+        recent_purchases,
+        recent_inventory_inflow,
+        recent_production,
+        friend_id,
+        friend_sold,
+        transparency,
+    );
+    if reserve_score <= EPSILON as f64 {
+        return base_limit;
+    }
+    let reserve_scale = exchange_media_reserve_stock_scale(
+        agent_id,
+        good_id,
+        reserve_bootstrap_floor,
+        base_need,
+        needs_level,
+        recent_sales,
+        recent_purchases,
+        recent_inventory_inflow,
+        friend_id,
+        friend_sold,
+    );
+    if reserve_scale <= EPSILON as f64 {
+        return base_limit;
+    }
+    base_limit + (reserve_bias * reserve_scale * reserve_score)
+}
+
+fn exchange_media_reserve_stock_scale(
+    agent_id: usize,
+    good_id: usize,
+    reserve_bootstrap_floor: f64,
+    base_need: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    recent_sales: ArrayView2<'_, f32>,
+    recent_purchases: ArrayView2<'_, f32>,
+    recent_inventory_inflow: ArrayView2<'_, f32>,
+    friend_id: ArrayView2<'_, i32>,
+    friend_sold: ArrayView3<'_, f32>,
+) -> f64 {
+    if agent_id >= friend_id.nrows()
+        || good_id >= recent_sales.ncols()
+        || agent_id >= base_need.nrows()
+        || good_id >= base_need.ncols()
+        || agent_id >= needs_level.len()
+    {
+        return 0.0;
+    }
+    let own_need_scale =
+        ((base_need[[agent_id, good_id]] as f64) * (needs_level[agent_id] as f64)).max(0.5);
+    let mut observed_acceptance = 0.0_f64;
+    let mut known_count = 0usize;
+    let mut accepting_count = 0usize;
+    for friend_slot in 0..friend_id.ncols() {
+        if friend_id[[agent_id, friend_slot]] < 0 {
+            continue;
+        }
+        known_count += 1;
+        let sold_count = friend_sold[[agent_id, friend_slot, good_id]] as f64;
+        observed_acceptance += sold_count;
+        if sold_count > 0.0 {
+            accepting_count += 1;
+        }
+    }
+    let acceptance_breadth = if known_count > 0 {
+        accepting_count as f64 / known_count as f64
+    } else {
+        0.0
+    };
+    let own_turnover = (recent_sales[[agent_id, good_id]] as f64)
+        .min((recent_purchases[[agent_id, good_id]] + recent_inventory_inflow[[agent_id, good_id]]) as f64)
+        .max(0.0);
+    let mut own_exchange_budget = 0.0_f64;
+    for other_good in 0..recent_purchases.ncols() {
+        own_exchange_budget +=
+            (recent_purchases[[agent_id, other_good]] + recent_inventory_inflow[[agent_id, other_good]]) as f64;
+    }
+    let budget_per_good = own_exchange_budget / (recent_purchases.ncols().max(1) as f64);
+    let local_flow_per_partner = observed_acceptance
+        .max(own_turnover)
+        / (known_count.max(1) as f64);
+    local_flow_per_partner
+        .max(budget_per_good * acceptance_breadth)
+        .max(own_need_scale * reserve_bootstrap_floor.max(0.0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_media_reserve_score(
+    agent_id: usize,
+    good_id: usize,
+    history: i32,
+    reserve_min_acceptance: f64,
+    base_need: ArrayView2<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    recent_sales: ArrayView2<'_, f32>,
+    recent_purchases: ArrayView2<'_, f32>,
+    recent_inventory_inflow: ArrayView2<'_, f32>,
+    recent_production: ArrayView2<'_, f32>,
+    friend_id: ArrayView2<'_, i32>,
+    friend_sold: ArrayView3<'_, f32>,
+    transparency: ArrayView3<'_, f32>,
+) -> f64 {
+    if agent_id >= friend_id.nrows()
+        || good_id >= recent_sales.ncols()
+        || agent_id >= base_need.nrows()
+        || good_id >= base_need.ncols()
+        || agent_id >= needs_level.len()
+    {
+        return 0.0;
+    }
+    let mut known_count = 0usize;
+    let mut accepting_count = 0usize;
+    let mut observed_acceptance = 0.0_f64;
+    let mut transparency_sum = 0.0_f64;
+    for friend_slot in 0..friend_id.ncols() {
+        if friend_id[[agent_id, friend_slot]] < 0 {
+            continue;
+        }
+        known_count += 1;
+        let sold_count = friend_sold[[agent_id, friend_slot, good_id]] as f64;
+        observed_acceptance += sold_count;
+        if sold_count > 0.0 {
+            accepting_count += 1;
+            transparency_sum += transparency[[agent_id, friend_slot, good_id]] as f64;
+        }
+    }
+    if known_count == 0 || accepting_count == 0 {
+        return 0.0;
+    }
+    let own_need_scale =
+        ((base_need[[agent_id, good_id]] as f64) * (needs_level[agent_id] as f64)).max(0.5);
+    let local_need_window = (own_need_scale * known_count as f64 * history.max(1) as f64).max(EPSILON as f64);
+    let need_normalized_acceptance = observed_acceptance / local_need_window;
+    if need_normalized_acceptance < reserve_min_acceptance {
+        return 0.0;
+    }
+    let acceptance_breadth = accepting_count as f64 / known_count as f64;
+    if acceptance_breadth <= EPSILON as f64 {
+        return 0.0;
+    }
+    let transparency_score = transparency_sum / accepting_count as f64;
+    let own_sales = recent_sales[[agent_id, good_id]] as f64;
+    let own_sources = (recent_purchases[[agent_id, good_id]]
+        + recent_inventory_inflow[[agent_id, good_id]]
+        + recent_production[[agent_id, good_id]]) as f64;
+    let turnover_score = if own_sales > EPSILON as f64 || own_sources > EPSILON as f64 {
+        own_sales.min(own_sources) / own_sales.max(own_sources).max(EPSILON as f64)
+    } else {
+        1.0
+    };
+    let volume_score =
+        (need_normalized_acceptance / reserve_min_acceptance.max(EPSILON as f64)).clamp(0.0, 1.0);
+    (transparency_score * acceptance_breadth.sqrt() * turnover_score.max(0.25) * volume_score)
+        .clamp(0.0, 1.0)
 }
 
 fn local_liquidity_stock_scale(
@@ -4336,8 +4614,12 @@ fn plan_agent_basket_candidates_from_views(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     forbidden_offer_by_need: &[bool],
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -4391,8 +4673,12 @@ fn plan_agent_basket_candidates_from_views(
         local_liquidity_stock_bias,
         local_liquidity_min_sales,
         aspirational_stock_target,
+        exchange_media_reserve_bias,
+        exchange_media_reserve_min_acceptance,
+        exchange_media_reserve_bootstrap_floor,
         forbidden_offer_by_need,
         elastic_need,
+        base_need,
         stock,
         role,
         stock_limit,
@@ -4426,9 +4712,13 @@ fn plan_one_basket_candidate_from_cached_links(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     forbidden_offer_by_need: &[bool],
     available_offer_goods: &[usize],
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -4461,9 +4751,15 @@ fn plan_one_basket_candidate_from_cached_links(
         local_liquidity_stock_bias,
         local_liquidity_min_sales,
         aspirational_stock_target,
+        exchange_media_reserve_bias,
+        exchange_media_reserve_min_acceptance,
+        exchange_media_reserve_bootstrap_floor,
         elastic_need,
+        base_need,
         stock,
         stock_limit,
+        purchase_price,
+        sales_price,
         needs_level,
         need,
         recent_sales,
@@ -4532,9 +4828,13 @@ fn plan_need_basket_candidates_from_cached_links(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     forbidden_offer_by_need: &[bool],
     available_offer_goods: &[usize],
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -4568,9 +4868,15 @@ fn plan_need_basket_candidates_from_cached_links(
         local_liquidity_stock_bias,
         local_liquidity_min_sales,
         aspirational_stock_target,
+        exchange_media_reserve_bias,
+        exchange_media_reserve_min_acceptance,
+        exchange_media_reserve_bootstrap_floor,
         elastic_need,
+        base_need,
         stock,
         stock_limit,
+        purchase_price,
+        sales_price,
         needs_level,
         need,
         recent_sales,
@@ -5036,8 +5342,12 @@ fn plan_agent_basket_candidates_from_cached_links(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     forbidden_offer_by_need: &[bool],
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -5105,9 +5415,13 @@ fn plan_agent_basket_candidates_from_cached_links(
                         local_liquidity_stock_bias,
                         local_liquidity_min_sales,
                         aspirational_stock_target,
+                        exchange_media_reserve_bias,
+                        exchange_media_reserve_min_acceptance,
+                        exchange_media_reserve_bootstrap_floor,
                         forbidden_offer_by_need,
                         &available_offer_goods,
                         elastic_need,
+                        base_need,
                         stock,
                         role,
                         stock_limit,
@@ -5149,9 +5463,13 @@ fn plan_agent_basket_candidates_from_cached_links(
                         local_liquidity_stock_bias,
                         local_liquidity_min_sales,
                         aspirational_stock_target,
+                        exchange_media_reserve_bias,
+                        exchange_media_reserve_min_acceptance,
+                        exchange_media_reserve_bootstrap_floor,
                         forbidden_offer_by_need,
                         &available_offer_goods,
                         elastic_need,
+                        base_need,
                         stock,
                         role,
                         stock_limit,
@@ -5195,9 +5513,13 @@ fn plan_agent_basket_candidates_from_cached_links(
                     local_liquidity_stock_bias,
                     local_liquidity_min_sales,
                     aspirational_stock_target,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
                     forbidden_offer_by_need,
                     &available_offer_goods,
                     elastic_need,
+                    base_need,
                     stock,
                     role,
                     stock_limit,
@@ -5238,9 +5560,13 @@ fn plan_agent_basket_candidates_from_cached_links(
                     local_liquidity_stock_bias,
                     local_liquidity_min_sales,
                     aspirational_stock_target,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
                     forbidden_offer_by_need,
                     &available_offer_goods,
                     elastic_need,
+                    base_need,
                     stock,
                     role,
                     stock_limit,
@@ -5369,6 +5695,15 @@ fn run_exchange_stage(
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
         .extract()?;
+    let exchange_media_reserve_bias: f64 = config
+        .getattr("experimental_exchange_media_reserve_bias")?
+        .extract()?;
+    let exchange_media_reserve_min_acceptance: f64 = config
+        .getattr("experimental_exchange_media_reserve_min_acceptance")?
+        .extract()?;
+    let exchange_media_reserve_bootstrap_floor: f64 = config
+        .getattr("experimental_exchange_media_reserve_bootstrap_floor")?
+        .extract()?;
     let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
     let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
     let max_attempts = goods * acquaintances;
@@ -5386,6 +5721,7 @@ fn run_exchange_stage(
     {
         let market_elastic_need: PyReadonlyArray1<'_, f32> =
             market.getattr("elastic_need")?.extract()?;
+        let base_need: PyReadonlyArray2<'_, f32> = state.getattr("base_need")?.extract()?;
         let mut market_periodic_tce_cost: PyReadwriteArray1<'_, f32> =
             market.getattr("periodic_tce_cost")?.extract()?;
         let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
@@ -5484,6 +5820,7 @@ fn run_exchange_stage(
         let mut accepted_mask = accepted_mask.as_array_mut();
         let mut accepted_quantity = accepted_quantity.as_array_mut();
         let elastic_need = market_elastic_need.as_array();
+        let base_need = base_need.as_array();
 
         let agent_friend_ids: Vec<i32> = (0..acquaintances)
             .map(|friend_slot| friend_id[[agent_id, friend_slot]])
@@ -5533,7 +5870,29 @@ fn run_exchange_stage(
                     stock_limit,
                     needs_level,
                 );
-                base_target_stock_limit.max(aspirational_target)
+                let exchange_media_reserve_target = exchange_media_reserve_target_stock_limit(
+                    agent_id,
+                    need_good,
+                    history,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
+                    base_need,
+                    needs_level,
+                    stock_limit,
+                    purchase_price,
+                    sales_price,
+                    recent_sales.view(),
+                    recent_purchases.view(),
+                    recent_inventory_inflow.view(),
+                    recent_production,
+                    friend_id.view(),
+                    friend_sold.view(),
+                    transparency.view(),
+                );
+                base_target_stock_limit
+                    .max(aspirational_target)
+                    .max(exchange_media_reserve_target)
             } else {
                 stock_limit[[agent_id, need_good]] as f64
             };
@@ -6240,12 +6599,22 @@ fn run_parallel_phenomenon_agent_tail(
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
         .extract()?;
+    let exchange_media_reserve_bias: f64 = config
+        .getattr("experimental_exchange_media_reserve_bias")?
+        .extract()?;
+    let exchange_media_reserve_min_acceptance: f64 = config
+        .getattr("experimental_exchange_media_reserve_min_acceptance")?
+        .extract()?;
+    let exchange_media_reserve_bootstrap_floor: f64 = config
+        .getattr("experimental_exchange_media_reserve_bootstrap_floor")?
+        .extract()?;
     let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
     let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
     let initial_transactions = 2.0_f32;
 
     let market_elastic_need: PyReadonlyArray1<'_, f32> =
         market.getattr("elastic_need")?.extract()?;
+    let base_need: PyReadonlyArray2<'_, f32> = state.getattr("base_need")?.extract()?;
     let mut market_periodic_tce_cost: PyReadwriteArray1<'_, f32> =
         market.getattr("periodic_tce_cost")?.extract()?;
     let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
@@ -6305,6 +6674,7 @@ fn run_parallel_phenomenon_agent_tail(
         trade.getattr("accepted_quantity")?.extract()?;
 
     let elastic_need = market_elastic_need.as_array();
+    let base_need = base_need.as_array();
     let mut market_periodic_tce_cost = market_periodic_tce_cost.as_array_mut();
     let mut stock = stock.as_array_mut();
     let role = role.as_array();
@@ -6365,10 +6735,14 @@ fn run_parallel_phenomenon_agent_tail(
             local_liquidity_stock_bias,
             local_liquidity_min_sales,
             aspirational_stock_target,
+            exchange_media_reserve_bias,
+            exchange_media_reserve_min_acceptance,
+            exchange_media_reserve_bootstrap_floor,
             min_trade_quantity,
             trade_rounding_buffer,
             &blocked_partner_mask,
             elastic_need,
+            base_need,
             stock.view(),
             role,
             stock_limit,
@@ -6619,6 +6993,15 @@ fn run_parallel_phenomenon_stage(
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
         .extract()?;
+    let exchange_media_reserve_bias: f64 = config
+        .getattr("experimental_exchange_media_reserve_bias")?
+        .extract()?;
+    let exchange_media_reserve_min_acceptance: f64 = config
+        .getattr("experimental_exchange_media_reserve_min_acceptance")?
+        .extract()?;
+    let exchange_media_reserve_bootstrap_floor: f64 = config
+        .getattr("experimental_exchange_media_reserve_bootstrap_floor")?
+        .extract()?;
     let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
     let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
     let initial_transactions = 2.0_f32;
@@ -6640,6 +7023,7 @@ fn run_parallel_phenomenon_stage(
 
     let market_elastic_need: PyReadonlyArray1<'_, f32> =
         market.getattr("elastic_need")?.extract()?;
+    let base_need: PyReadonlyArray2<'_, f32> = state.getattr("base_need")?.extract()?;
     let mut market_periodic_tce_cost: PyReadwriteArray1<'_, f32> =
         market.getattr("periodic_tce_cost")?.extract()?;
     let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
@@ -6699,6 +7083,7 @@ fn run_parallel_phenomenon_stage(
         trade.getattr("accepted_quantity")?.extract()?;
 
     let elastic_need = market_elastic_need.as_array();
+    let base_need = base_need.as_array();
     let mut market_periodic_tce_cost = market_periodic_tce_cost.as_array_mut();
     let mut stock = stock.as_array_mut();
     let role = role.as_array();
@@ -6785,9 +7170,13 @@ fn run_parallel_phenomenon_stage(
                     local_liquidity_stock_bias,
                     local_liquidity_min_sales,
                     aspirational_stock_target,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
                     min_trade_quantity,
                     trade_rounding_buffer,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     role,
                     stock_limit,
@@ -7072,6 +7461,9 @@ fn run_basket_session_internal(
     local_liquidity_stock_bias: f64,
     local_liquidity_min_sales: f64,
     aspirational_stock_target: f64,
+    exchange_media_reserve_bias: f64,
+    exchange_media_reserve_min_acceptance: f64,
+    exchange_media_reserve_bootstrap_floor: f64,
     replan_after_each_trade: bool,
     disable_replan_cache: bool,
     disable_offer_prefilter: bool,
@@ -7082,6 +7474,7 @@ fn run_basket_session_internal(
     max_attempts: usize,
     initial_transactions: f32,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     market_periodic_tce_cost: &mut ArrayViewMut1<'_, f32>,
     stock: &mut ArrayViewMut2<'_, f32>,
     role: ArrayView2<'_, i32>,
@@ -7230,9 +7623,15 @@ fn run_basket_session_internal(
                         local_liquidity_stock_bias,
                         local_liquidity_min_sales,
                         aspirational_stock_target,
+                        exchange_media_reserve_bias,
+                        exchange_media_reserve_min_acceptance,
+                        exchange_media_reserve_bootstrap_floor,
                         elastic_need,
+                        base_need,
                         stock.view(),
                         stock_limit,
+                        purchase_price,
+                        sales_price,
                         needs_level,
                         need.view(),
                         recent_sales.view(),
@@ -7299,8 +7698,12 @@ fn run_basket_session_internal(
                     local_liquidity_stock_bias,
                     local_liquidity_min_sales,
                     aspirational_stock_target,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
                     &forbidden_offer_by_need,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     role,
                     stock_limit,
@@ -7394,9 +7797,15 @@ fn run_basket_session_internal(
                         local_liquidity_stock_bias,
                         local_liquidity_min_sales,
                         aspirational_stock_target,
+                        exchange_media_reserve_bias,
+                        exchange_media_reserve_min_acceptance,
+                        exchange_media_reserve_bootstrap_floor,
                         elastic_need,
+                        base_need,
                         stock.view(),
                         stock_limit,
+                        purchase_price,
+                        sales_price,
                         needs_level,
                         need.view(),
                         recent_sales.view(),
@@ -7473,8 +7882,12 @@ fn run_basket_session_internal(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 &forbidden_offer_by_need,
                 elastic_need,
+                base_need,
                 stock.view(),
                 role,
                 stock_limit,
@@ -7533,9 +7946,15 @@ fn run_basket_session_internal(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 elastic_need,
+                base_need,
                 stock.view(),
                 stock_limit,
+                purchase_price,
+                sales_price,
                 needs_level,
                 need.view(),
                 recent_sales.view(),
@@ -7986,6 +8405,15 @@ fn run_phenomenon_session_stage(
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
         .extract()?;
+    let exchange_media_reserve_bias: f64 = config
+        .getattr("experimental_exchange_media_reserve_bias")?
+        .extract()?;
+    let exchange_media_reserve_min_acceptance: f64 = config
+        .getattr("experimental_exchange_media_reserve_min_acceptance")?
+        .extract()?;
+    let exchange_media_reserve_bootstrap_floor: f64 = config
+        .getattr("experimental_exchange_media_reserve_bootstrap_floor")?
+        .extract()?;
     let session_replan_passes: usize = config
         .getattr("experimental_session_replan_passes")?
         .extract()?;
@@ -8010,6 +8438,7 @@ fn run_phenomenon_session_stage(
 
     let market_elastic_need: PyReadonlyArray1<'_, f32> =
         market.getattr("elastic_need")?.extract()?;
+    let base_need: PyReadonlyArray2<'_, f32> = state.getattr("base_need")?.extract()?;
     let mut market_periodic_tce_cost: PyReadwriteArray1<'_, f32> =
         market.getattr("periodic_tce_cost")?.extract()?;
     let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
@@ -8069,6 +8498,7 @@ fn run_phenomenon_session_stage(
         trade.getattr("accepted_quantity")?.extract()?;
 
     let elastic_need = market_elastic_need.as_array();
+    let base_need = base_need.as_array();
     let mut market_periodic_tce_cost = market_periodic_tce_cost.as_array_mut();
     let mut stock = stock.as_array_mut();
     let role = role.as_array();
@@ -8130,6 +8560,9 @@ fn run_phenomenon_session_stage(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 session_replan_after_trade,
                 session_disable_replan_cache,
                 session_disable_offer_prefilter,
@@ -8140,6 +8573,7 @@ fn run_phenomenon_session_stage(
                 max_attempts,
                 initial_transactions,
                 elastic_need,
+                base_need,
                 &mut market_periodic_tce_cost,
                 &mut stock,
                 role,
@@ -8231,6 +8665,15 @@ fn run_agent_basket_exchange_stage(
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
         .extract()?;
+    let exchange_media_reserve_bias: f64 = config
+        .getattr("experimental_exchange_media_reserve_bias")?
+        .extract()?;
+    let exchange_media_reserve_min_acceptance: f64 = config
+        .getattr("experimental_exchange_media_reserve_min_acceptance")?
+        .extract()?;
+    let exchange_media_reserve_bootstrap_floor: f64 = config
+        .getattr("experimental_exchange_media_reserve_bootstrap_floor")?
+        .extract()?;
     let session_candidate_depth: usize = config
         .getattr("experimental_session_candidate_depth")?
         .extract()?;
@@ -8257,6 +8700,7 @@ fn run_agent_basket_exchange_stage(
     {
         let market_elastic_need: PyReadonlyArray1<'_, f32> =
             market.getattr("elastic_need")?.extract()?;
+        let base_need: PyReadonlyArray2<'_, f32> = state.getattr("base_need")?.extract()?;
         let mut market_periodic_tce_cost: PyReadwriteArray1<'_, f32> =
             market.getattr("periodic_tce_cost")?.extract()?;
         let mut stock: PyReadwriteArray2<'_, f32> = state.getattr("stock")?.extract()?;
@@ -8355,6 +8799,7 @@ fn run_agent_basket_exchange_stage(
         let mut accepted_mask = accepted_mask.as_array_mut();
         let mut accepted_quantity = accepted_quantity.as_array_mut();
         let elastic_need = market_elastic_need.as_array();
+        let base_need = base_need.as_array();
         let mut forbidden_offer_by_need = vec![false; goods * goods];
         let agent_friend_ids: Vec<i32> = (0..acquaintances)
             .map(|friend_slot| friend_id[[agent_id, friend_slot]])
@@ -8385,8 +8830,12 @@ fn run_agent_basket_exchange_stage(
                 local_liquidity_stock_bias,
                 local_liquidity_min_sales,
                 aspirational_stock_target,
+                exchange_media_reserve_bias,
+                exchange_media_reserve_min_acceptance,
+                exchange_media_reserve_bootstrap_floor,
                 &forbidden_offer_by_need,
                 elastic_need,
+                base_need,
                 stock.view(),
                 role,
                 stock_limit,
@@ -8438,9 +8887,15 @@ fn run_agent_basket_exchange_stage(
                     local_liquidity_stock_bias,
                     local_liquidity_min_sales,
                     aspirational_stock_target,
+                    exchange_media_reserve_bias,
+                    exchange_media_reserve_min_acceptance,
+                    exchange_media_reserve_bootstrap_floor,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     stock_limit,
+                    purchase_price,
+                    sales_price,
                     needs_level,
                     need.view(),
                     recent_sales.view(),
@@ -8768,6 +9223,15 @@ fn run_full_native_agent_basket_cycle(
     let aspirational_stock_target: f64 = config
         .getattr("experimental_aspirational_stock_target")?
         .extract()?;
+    let exchange_media_reserve_bias: f64 = config
+        .getattr("experimental_exchange_media_reserve_bias")?
+        .extract()?;
+    let exchange_media_reserve_min_acceptance: f64 = config
+        .getattr("experimental_exchange_media_reserve_min_acceptance")?
+        .extract()?;
+    let exchange_media_reserve_bootstrap_floor: f64 = config
+        .getattr("experimental_exchange_media_reserve_bootstrap_floor")?
+        .extract()?;
     let session_candidate_depth: usize = config
         .getattr("experimental_session_candidate_depth")?
         .extract()?;
@@ -8985,6 +9449,9 @@ fn run_full_native_agent_basket_cycle(
             local_liquidity_stock_bias,
             local_liquidity_min_sales,
             aspirational_stock_target,
+            exchange_media_reserve_bias,
+            exchange_media_reserve_min_acceptance,
+            exchange_media_reserve_bootstrap_floor,
             session_replan_after_trade,
             session_disable_replan_cache,
             session_disable_offer_prefilter,
@@ -8995,6 +9462,7 @@ fn run_full_native_agent_basket_cycle(
             max_attempts,
             initial_transactions,
             elastic_need,
+            base_need,
             &mut market_periodic_tce_cost,
             &mut stock,
             role.view(),
@@ -9107,6 +9575,9 @@ fn run_full_native_agent_basket_cycle(
             local_liquidity_stock_bias,
             local_liquidity_min_sales,
             aspirational_stock_target,
+            exchange_media_reserve_bias,
+            exchange_media_reserve_min_acceptance,
+            exchange_media_reserve_bootstrap_floor,
             session_replan_after_trade,
             session_disable_replan_cache,
             session_disable_offer_prefilter,
@@ -9117,6 +9588,7 @@ fn run_full_native_agent_basket_cycle(
             max_attempts,
             initial_transactions,
             elastic_need,
+            base_need,
             &mut market_periodic_tce_cost,
             &mut stock,
             role.view(),

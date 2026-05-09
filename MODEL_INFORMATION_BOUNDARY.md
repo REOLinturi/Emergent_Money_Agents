@@ -30,6 +30,12 @@ The transaction-value accounting added for monetary diagnostics is also observat
 
 The monetary-role score is an ex post merchant-intermediation diagnostic. It counts recent purchase, sale, inventory-inflow, and observed value flows only for agent-good cells currently in the retailer role. This separates goods acquired for resale or later exchange from ordinary consumption stock inflow.
 
+The opt-in exchange-media reserve heuristic follows the same boundary. It can
+raise a surplus inventory target only from direct friend acceptance evidence,
+dyadic transparency, the agent's own recent turnover, the agent's own exchange
+budget, and the agent's own buy/sell thresholds. It does not use global rarity,
+global money rankings, or dashboard-level exchange-media scores.
+
 ## Validation Rule
 
 Every new heuristic that changes decisions must state its information source explicitly and have a regression test proving that it does not activate from global-only evidence. Every new dashboard metric must be documented as observational and kept outside the simulation decision path.

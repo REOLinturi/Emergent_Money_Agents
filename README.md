@@ -14,6 +14,7 @@ This repository contains the historical Emergent Money documents together with a
 - `MODEL_INFORMATION_BOUNDARY.md` - agent decision information boundary: only local own-history and direct-acquaintance observations may affect heuristics
 - `MARKET_ORDER_AND_PARALLELISM.md` - why exact barter commit stays sequential, how that maps to primitive exchange, and when richer market institutions can justify more parallel execution
 - `PHENOMENON_BASELINE.md` - current fallback baseline for the Rust per-agent basket phenomenon path and rejection rules for weaker optimization experiments
+- `LIQUIDITY_RESERVE_PLAN.md` - planned local exchange-media reserve heuristic, report compatibility notes, and acceptance tests
 - `RESEARCH_MECHANISM_AND_HYPOTHESES.md` - paper-oriented contribution framing, research hypotheses, Burt structural-holes note, and source/data plan for the network-spillover line
 
 ## Current Direction

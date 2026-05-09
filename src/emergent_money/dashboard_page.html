@@ -372,7 +372,7 @@
             <div id="goodsStats" class="chart-values small"></div>
             <table>
               <thead>
-                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Share of agents holding the good above own consumption scale.">Excess holders</th><th title="Share of agents both buying and selling the good in recent history.">Round trips</th><th title="Share of observed flow handled by agents currently in consumer role for this good. High values look more like final consumption chains than exchange media.">Cons flow</th><th title="Quantity-based merchant-money score.">Qty score</th><th title="Value-weighted merchant-money score.">Value score</th></tr>
+                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Share of agents holding the good above own consumption scale.">Excess holders</th><th title="Share of agents both buying and selling the good in recent history.">Round trips</th><th title="Mean local score that can justify exchange-media reserve from direct acquaintance observations.">Liq score</th><th title="Total would-be exchange-media reserve pressure under the current local evidence.">Reserve gap</th><th title="Share of agent-good cells where own purchase threshold does not exceed own sales threshold.">Spread ok</th><th title="Share of observed flow handled by agents currently in consumer role for this good. High values look more like final consumption chains than exchange media.">Cons flow</th></tr>
               </thead>
               <tbody id="goodsTable"></tbody>
             </table>
@@ -483,7 +483,7 @@
       chart_welfare: ['Welfare path', 'Achieved living-standard percentiles are shown in baseline-multiplier units. Median tracks typical welfare; p10 shows distress at the lower tail; p90 shows upper-tail gains.'],
       chart_trade: ['Trade pulse', 'Accepted trade volume shows market activity. Inventory trade shows the portion associated with intermediation and stock-building, which may grow before welfare improves.'],
       chart_money: ['Monetary shift', 'Rare-money share shows whether rare goods act as exchange media through merchant-style intermediation. The blue line is a lighter approximation that does not rely on barter direction; it scores broad local circulation, stock over need, and transaction-cost loss relative to need. These aggregates are not visible to agents.'],
-      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Excess holders and round trips help separate a possible medium of exchange from an ordinary producer-distributor-consumer chain; high consumer flow is a warning that the good may mostly be a final consumption good.'],
+      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Liq score and reserve gap are local-decision diagnostics: they show whether a good has enough directly observed acceptability to justify a reserve before we blame scoring or execution.'],
       chart_roles: ['Role mix by good', 'This table shows whether goods are mainly produced, consumed, or intermediated, and whether production is concentrated enough to indicate specialization.'],
     };
     const helpButton = (key, label) => helpText[key]
@@ -651,9 +651,10 @@
           <td class="mono">${pct(item.network_circulation_breadth)}</td>
           <td class="mono">${pct(item.excess_stock_breadth)}</td>
           <td class="mono">${pct(item.round_trip_breadth)}</td>
+          <td class="mono">${Number(item.local_liquidity_score || 0).toFixed(3)}</td>
+          <td class="mono">${num(item.exchange_media_reserve_gap)}</td>
+          <td class="mono">${pct(item.exchange_media_spread_ok_share)}</td>
           <td class="mono">${pct(item.consumer_flow_share)}</td>
-          <td class="mono">${Number(item.monetary_score || 0).toFixed(3)}</td>
-          <td class="mono">${Number(item.value_weighted_monetary_score || 0).toFixed(3)}</td>
         </tr>
       `).join('');
 
@@ -706,6 +707,8 @@
         chartChip({ label: 'top', value: topCandidate ? `${goodLabel(topCandidate)} ${Number(topCandidate.exchange_media_score || 0).toFixed(3)}` : 'n/a', color: topCandidate?.is_rare ? '#844719' : '#185f49' }),
         chartChip({ label: 'excess holders', value: topCandidate ? pct(topCandidate.excess_stock_breadth) : 'n/a', color: '#4f6f94' }),
         chartChip({ label: 'round trips', value: topCandidate ? pct(topCandidate.round_trip_breadth) : 'n/a', color: '#185f49' }),
+        chartChip({ label: 'liq score', value: topCandidate ? Number(topCandidate.local_liquidity_score || 0).toFixed(3) : 'n/a', color: '#4f6f94' }),
+        chartChip({ label: 'reserve gap', value: topCandidate ? num(topCandidate.exchange_media_reserve_gap) : 'n/a', color: '#c58b37' }),
         chartChip({ label: 'rare rows', value: `${rareCandidateCount}/${state.goods.length}`, color: '#844719' }),
         chartChip({ label: 'common rows', value: String(commonCandidateCount), color: '#185f49' }),
       ].join('');

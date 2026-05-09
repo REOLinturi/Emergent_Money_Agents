@@ -38,6 +38,9 @@ def test_config_shapes_follow_parameters() -> None:
         experimental_local_liquidity_stock_bias=1.5,
         experimental_local_liquidity_min_sales=3.0,
         experimental_aspirational_stock_target=2.0,
+        experimental_exchange_media_reserve_bias=0.75,
+        experimental_exchange_media_reserve_min_acceptance=4.0,
+        experimental_exchange_media_reserve_bootstrap_floor=1.5,
         experimental_session_replan_passes=4,
         experimental_session_replan_after_trade=True,
         experimental_session_disable_replan_cache=True,
@@ -73,6 +76,9 @@ def test_config_shapes_follow_parameters() -> None:
     assert config.experimental_local_liquidity_stock_bias == pytest.approx(1.5)
     assert config.experimental_local_liquidity_min_sales == pytest.approx(3.0)
     assert config.experimental_aspirational_stock_target == pytest.approx(2.0)
+    assert config.experimental_exchange_media_reserve_bias == pytest.approx(0.75)
+    assert config.experimental_exchange_media_reserve_min_acceptance == pytest.approx(4.0)
+    assert config.experimental_exchange_media_reserve_bootstrap_floor == pytest.approx(1.5)
     assert config.experimental_session_replan_passes == 4
     assert config.experimental_session_replan_after_trade is True
     assert config.experimental_session_disable_replan_cache is True
@@ -129,6 +135,15 @@ def test_config_rejects_invalid_local_liquidity_settings() -> None:
 
     with pytest.raises(ValueError):
         SimulationConfig(experimental_aspirational_stock_target=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_exchange_media_reserve_bias=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_exchange_media_reserve_min_acceptance=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_exchange_media_reserve_bootstrap_floor=-0.01)
 
     with pytest.raises(ValueError):
         SimulationConfig(experimental_session_replan_passes=0)

@@ -114,6 +114,41 @@ def test_local_liquidity_surplus_buffer_scales_from_observed_intermediary_flow()
     assert runner._surplus_target_stock_limit(0, 1) == pytest.approx(2.0)
 
 
+def test_exchange_media_reserve_normalizes_acceptance_by_local_need() -> None:
+    config = SimulationConfig(
+        population=2,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+        experimental_exchange_media_reserve_bias=2.0,
+        experimental_exchange_media_reserve_min_acceptance=1.0,
+        experimental_exchange_media_reserve_bootstrap_floor=1.0,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.friend_id[...] = np.array([[1], [0]], dtype=np.int32)
+    state.transparency[...] = 1.0
+    state.needs_level[...] = 1.0
+    state.market.elastic_need[...] = np.array([1.0, 100.0], dtype=np.float32)
+    state.stock_limit[0, :] = 2.0
+    state.purchase_price[0, :] = 1.0
+    state.sales_price[0, :] = 2.0
+
+    # The same raw local acceptance is strong evidence for g0, but it is just
+    # ordinary consumption-scale flow for g1. This prevents high-need goods
+    # from winning the reserve heuristic merely through raw volume.
+    state.friend_sold[0, 0, :] = 4.0
+    state.recent_sales[0, :] = 4.0
+    state.recent_purchases[0, :] = 4.0
+
+    assert runner._exchange_media_reserve_target_stock_limit(0, 0) > float(state.stock_limit[0, 0])
+    assert runner._exchange_media_reserve_target_stock_limit(0, 1) == pytest.approx(float(state.stock_limit[0, 1]))
+
+
 def test_end_agent_period_spoils_stock_above_threshold() -> None:
     config = SimulationConfig(
         population=1,

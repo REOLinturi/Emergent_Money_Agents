@@ -54,6 +54,9 @@ class SimulationConfig:
     experimental_local_liquidity_stock_bias: float = 0.0
     experimental_local_liquidity_min_sales: float = 2.0
     experimental_aspirational_stock_target: float = 0.0
+    experimental_exchange_media_reserve_bias: float = 0.0
+    experimental_exchange_media_reserve_min_acceptance: float = 0.01
+    experimental_exchange_media_reserve_bootstrap_floor: float = 1.0
     experimental_session_replan_passes: int = 1
     experimental_session_replan_after_trade: bool = False
     experimental_session_disable_replan_cache: bool = False
@@ -170,6 +173,12 @@ class SimulationConfig:
             raise ValueError("experimental_local_liquidity_min_sales must be non-negative")
         if self.experimental_aspirational_stock_target < 0.0:
             raise ValueError("experimental_aspirational_stock_target must be non-negative")
+        if self.experimental_exchange_media_reserve_bias < 0.0:
+            raise ValueError("experimental_exchange_media_reserve_bias must be non-negative")
+        if self.experimental_exchange_media_reserve_min_acceptance < 0.0:
+            raise ValueError("experimental_exchange_media_reserve_min_acceptance must be non-negative")
+        if self.experimental_exchange_media_reserve_bootstrap_floor < 0.0:
+            raise ValueError("experimental_exchange_media_reserve_bootstrap_floor must be non-negative")
         if self.experimental_session_replan_passes <= 0:
             raise ValueError("experimental_session_replan_passes must be positive")
         if self.experimental_session_candidate_depth <= 0:

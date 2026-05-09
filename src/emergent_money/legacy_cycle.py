@@ -995,8 +995,11 @@ class LegacyCycleRunner:
         for need_good in range(self.config.goods):
             target_stock_limit = self._surplus_target_stock_limit(agent_id, need_good)
             aspirational_target = self._aspirational_stock_target(agent_id, need_good)
+            exchange_media_reserve_target = self._exchange_media_reserve_target_stock_limit(agent_id, need_good)
             if aspirational_target > target_stock_limit:
                 target_stock_limit = aspirational_target
+            if exchange_media_reserve_target > target_stock_limit:
+                target_stock_limit = exchange_media_reserve_target
             legacy_surplus_signal = (
                 self.state.recent_sales[agent_id, need_good]
                 > (
@@ -1672,8 +1675,11 @@ class LegacyCycleRunner:
 
         target_stock_limit = self._surplus_target_stock_limit(agent_id, need_good)
         aspirational_target = self._aspirational_stock_target(agent_id, need_good)
+        exchange_media_reserve_target = self._exchange_media_reserve_target_stock_limit(agent_id, need_good)
         if aspirational_target > target_stock_limit:
             target_stock_limit = aspirational_target
+        if exchange_media_reserve_target > target_stock_limit:
+            target_stock_limit = exchange_media_reserve_target
         legacy_surplus_signal = (
             self.state.recent_sales[agent_id, need_good]
             > (
@@ -1701,6 +1707,97 @@ class LegacyCycleRunner:
         if stock_scale <= _EPSILON:
             return base_limit
         return base_limit + (bias * stock_scale * liquidity_score)
+
+    def _exchange_media_reserve_target_stock_limit(self, agent_id: int, good_id: int) -> float:
+        base_limit = float(self.state.stock_limit[agent_id, good_id])
+        bias = float(self.config.experimental_exchange_media_reserve_bias)
+        if bias <= _EPSILON:
+            return base_limit
+        if float(self.state.purchase_price[agent_id, good_id]) > float(self.state.sales_price[agent_id, good_id]) + _EPSILON:
+            return base_limit
+
+        reserve_score = self._local_exchange_media_reserve_score(agent_id, good_id)
+        if reserve_score <= _EPSILON:
+            return base_limit
+        reserve_scale = self._local_exchange_media_reserve_stock_scale(agent_id, good_id)
+        if reserve_scale <= _EPSILON:
+            return base_limit
+        return base_limit + (bias * reserve_scale * reserve_score)
+
+    def _local_exchange_media_reserve_score(self, agent_id: int, good_id: int) -> float:
+        """Local, consumption-normalized exchange-media signal.
+
+        Raw local volume would systematically favor high-consumption goods. A
+        payment medium should instead show acceptance beyond what the local
+        final-consumption window explains.
+        """
+        friend_row = self.state.friend_id[agent_id]
+        known_mask = friend_row >= 0
+        known_count = int(np.count_nonzero(known_mask))
+        if known_count <= 0:
+            return 0.0
+
+        sold_to_friend = self.state.friend_sold[agent_id, known_mask, good_id].astype(np.float64, copy=False)
+        observed_acceptance = float(np.sum(sold_to_friend, dtype=np.float64))
+        accepting_mask = sold_to_friend > 0.0
+        acceptance_breadth = float(np.count_nonzero(accepting_mask)) / float(known_count)
+        if acceptance_breadth <= _EPSILON:
+            return 0.0
+
+        own_need_scale = max(
+            float(self.state.base_need[agent_id, good_id]) * float(self.state.needs_level[agent_id]),
+            float(self.config.min_trade_quantity),
+        )
+        local_need_window = max(own_need_scale * float(known_count) * float(max(self.config.history, 1)), _EPSILON)
+        need_normalized_acceptance = observed_acceptance / local_need_window
+        if need_normalized_acceptance < float(self.config.experimental_exchange_media_reserve_min_acceptance):
+            return 0.0
+
+        transparency_row = self.state.transparency[agent_id, known_mask, good_id].astype(np.float64, copy=False)
+        transparency_score = float(np.mean(transparency_row[accepting_mask], dtype=np.float64))
+        own_sales = float(self.state.recent_sales[agent_id, good_id])
+        own_sources = float(
+            self.state.recent_purchases[agent_id, good_id]
+            + self.state.recent_inventory_inflow[agent_id, good_id]
+            + self.state.recent_production[agent_id, good_id]
+        )
+        turnover_score = 1.0
+        if own_sales > _EPSILON or own_sources > _EPSILON:
+            turnover_score = min(own_sales, own_sources) / max(own_sales, own_sources, _EPSILON)
+        volume_score = min(1.0, need_normalized_acceptance / max(float(self.config.experimental_exchange_media_reserve_min_acceptance), _EPSILON))
+        score = transparency_score * sqrt(acceptance_breadth) * max(turnover_score, 0.25) * volume_score
+        return float(max(0.0, min(score, 1.0)))
+
+    def _local_exchange_media_reserve_stock_scale(self, agent_id: int, good_id: int) -> float:
+        friend_row = self.state.friend_id[agent_id]
+        known_mask = friend_row >= 0
+        known_count = int(np.count_nonzero(known_mask))
+        own_need_scale = max(
+            float(self.state.base_need[agent_id, good_id]) * float(self.state.needs_level[agent_id]),
+            float(self.config.min_trade_quantity),
+        )
+        observed_acceptance = 0.0
+        accepting_count = 0
+        if known_count > 0:
+            sold_to_friend = self.state.friend_sold[agent_id, known_mask, good_id].astype(np.float64, copy=False)
+            observed_acceptance = float(np.sum(sold_to_friend, dtype=np.float64))
+            accepting_count = int(np.count_nonzero(sold_to_friend > 0.0))
+        acceptance_breadth = float(accepting_count) / float(max(known_count, 1))
+
+        own_turnover = max(
+            min(
+                float(self.state.recent_sales[agent_id, good_id]),
+                float(self.state.recent_purchases[agent_id, good_id] + self.state.recent_inventory_inflow[agent_id, good_id]),
+            ),
+            0.0,
+        )
+        local_flow_per_partner = max(observed_acceptance, own_turnover) / float(max(known_count, 1))
+        own_exchange_budget = float(
+            np.sum(self.state.recent_purchases[agent_id] + self.state.recent_inventory_inflow[agent_id], dtype=np.float64)
+        )
+        budget_per_good = own_exchange_budget / float(max(self.config.goods, 1))
+        bootstrap_scale = own_need_scale * max(float(self.config.experimental_exchange_media_reserve_bootstrap_floor), 0.0)
+        return max(bootstrap_scale, local_flow_per_partner, budget_per_good * acceptance_breadth)
 
     def _aspirational_stock_target(self, agent_id: int, good_id: int) -> float:
         target_multiplier = float(self.config.experimental_aspirational_stock_target)
