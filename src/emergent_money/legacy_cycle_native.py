@@ -176,7 +176,8 @@ class NativeLegacyCycleBackend:
         state = self._state
         market = self._market
         config = self._config
-        result = self._native_module.plan_exchange_basket(
+        standardization_scores = config.exchange_standardization_scores()
+        kwargs = dict(
             agent_id=agent_id,
             deal_type=deal_type,
             goods=config.goods,
@@ -208,6 +209,16 @@ class NativeLegacyCycleBackend:
             recent_production=state.recent_production,
             friend_sold=state.friend_sold,
         )
+        kwargs["standardization_scores"] = standardization_scores
+        try:
+            result = self._native_module.plan_exchange_basket(**kwargs)
+        except TypeError as exc:
+            if bool(np.any(standardization_scores > 0.0)):
+                raise RuntimeError(
+                    "experimental standardization requires rebuilding and reinstalling the Rust native extension"
+                ) from exc
+            kwargs.pop("standardization_scores", None)
+            result = self._native_module.plan_exchange_basket(**kwargs)
         return [
             (float(score), int(need_good), int(friend_slot), int(friend_id), int(offer_good))
             for score, need_good, friend_slot, friend_id, offer_good in result
@@ -467,6 +478,8 @@ class NativeLegacyCycleBackend:
             stock_limit_multiplier=config.stock_limit_multiplier,
             activity_discount=config.activity_discount,
             spoilage_rate=config.spoilage_rate,
+            storage_spoilage_rates=config.storage_spoilage_rates(),
+            storage_target_multipliers=config.storage_target_multipliers(),
             stock_spoil_threshold=config.stock_spoil_threshold,
             price_reduction=config.price_reduction,
             price_hike=config.price_hike,
@@ -508,11 +521,19 @@ class NativeLegacyCycleBackend:
             sales_price=state.sales_price,
             friend_activity=state.friend_activity,
             friend_purchased=state.friend_purchased,
+            friend_sold=state.friend_sold,
+            friend_id=state.friend_id,
+            reputation_product_experience=state.reputation_product_experience,
+            reputation_seller_activity=state.reputation_seller_activity,
+            reputation_seller_breadth=state.reputation_seller_breadth,
             transparency=state.transparency,
             needs_level=state.needs_level,
             market_elastic_need=market.elastic_need,
             market_periodic_spoilage=market.periodic_spoilage,
             use_value_price_floor_fraction=config.use_value_price_floor_fraction,
+            transparency_recent_count=config.experimental_transparency_learning_mode == "recent-count",
+            endogenous_standardization_strength=config.experimental_endogenous_standardization_strength,
+            endogenous_standardization_need_power=config.experimental_endogenous_standardization_need_power,
         )
 
 

@@ -41,6 +41,19 @@ def test_config_shapes_follow_parameters() -> None:
         experimental_exchange_media_reserve_bias=0.75,
         experimental_exchange_media_reserve_min_acceptance=4.0,
         experimental_exchange_media_reserve_bootstrap_floor=1.5,
+        experimental_storage_class_mode="mod3",
+        experimental_poor_storage_spoilage_multiplier=3.0,
+        experimental_medium_storage_spoilage_multiplier=1.0,
+        experimental_good_storage_spoilage_multiplier=0.1,
+        experimental_poor_storage_target_multiplier=0.25,
+        experimental_medium_storage_target_multiplier=1.0,
+        experimental_good_storage_target_multiplier=3.0,
+        experimental_standardization_mode="rare",
+        experimental_standardization_strength=0.6,
+        experimental_standardization_random_seed=17,
+        experimental_transparency_learning_mode="recent-count",
+        experimental_endogenous_standardization_strength=0.4,
+        experimental_endogenous_standardization_need_power=0.75,
         experimental_session_replan_passes=4,
         experimental_session_replan_after_trade=True,
         experimental_session_disable_replan_cache=True,
@@ -79,6 +92,17 @@ def test_config_shapes_follow_parameters() -> None:
     assert config.experimental_exchange_media_reserve_bias == pytest.approx(0.75)
     assert config.experimental_exchange_media_reserve_min_acceptance == pytest.approx(4.0)
     assert config.experimental_exchange_media_reserve_bootstrap_floor == pytest.approx(1.5)
+    assert config.experimental_storage_class_mode == "mod3"
+    assert config.storage_class_codes().tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
+    assert config.storage_spoilage_rates().tolist() == pytest.approx([0.3, 0.1, 0.01, 0.3, 0.1, 0.01, 0.3, 0.1])
+    assert config.storage_target_multipliers().tolist() == pytest.approx([0.25, 1.0, 3.0, 0.25, 1.0, 3.0, 0.25, 1.0])
+    assert config.experimental_standardization_mode == "rare"
+    assert config.experimental_standardization_strength == pytest.approx(0.6)
+    assert config.experimental_standardization_random_seed == 17
+    assert config.exchange_standardization_scores().tolist() == pytest.approx([0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert config.experimental_transparency_learning_mode == "recent-count"
+    assert config.experimental_endogenous_standardization_strength == pytest.approx(0.4)
+    assert config.experimental_endogenous_standardization_need_power == pytest.approx(0.75)
     assert config.experimental_session_replan_passes == 4
     assert config.experimental_session_replan_after_trade is True
     assert config.experimental_session_disable_replan_cache is True
@@ -146,6 +170,36 @@ def test_config_rejects_invalid_local_liquidity_settings() -> None:
         SimulationConfig(experimental_exchange_media_reserve_bootstrap_floor=-0.01)
 
     with pytest.raises(ValueError):
+        SimulationConfig(experimental_storage_class_mode="by-report-id")
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_poor_storage_spoilage_multiplier=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_good_storage_target_multiplier=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_standardization_mode="global-money")
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_standardization_strength=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_standardization_strength=1.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_transparency_learning_mode="cumulative-volume")
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_endogenous_standardization_strength=-0.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_endogenous_standardization_strength=1.01)
+
+    with pytest.raises(ValueError):
+        SimulationConfig(experimental_endogenous_standardization_need_power=-0.01)
+
+    with pytest.raises(ValueError):
         SimulationConfig(experimental_session_replan_passes=0)
 
     with pytest.raises(ValueError):
@@ -158,3 +212,62 @@ def test_config_rejects_invalid_spaced_good_settings() -> None:
 
     with pytest.raises(ValueError):
         SimulationConfig(base_good_id_stride=0)
+
+
+def test_exchange_standardization_scores_support_experimental_controls() -> None:
+    rare = SimulationConfig(goods=8, experimental_standardization_mode="rare", experimental_standardization_strength=0.5)
+    common = SimulationConfig(goods=8, experimental_standardization_mode="common", experimental_standardization_strength=0.5)
+    rare_gradient = SimulationConfig(
+        goods=4,
+        experimental_standardization_mode="rare-gradient",
+        experimental_standardization_strength=0.8,
+    )
+    random_a = SimulationConfig(
+        goods=8,
+        experimental_standardization_mode="random",
+        experimental_standardization_strength=0.5,
+        experimental_standardization_random_seed=1,
+    )
+    random_b = SimulationConfig(
+        goods=8,
+        experimental_standardization_mode="random",
+        experimental_standardization_strength=0.5,
+        experimental_standardization_random_seed=1,
+    )
+
+    assert SimulationConfig(goods=8).exchange_standardization_scores().tolist() == pytest.approx([0.0] * 8)
+    assert rare.exchange_standardization_scores().tolist() == pytest.approx([0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert common.exchange_standardization_scores().tolist() == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5])
+    assert rare_gradient.exchange_standardization_scores().tolist() == pytest.approx([0.8, 0.533333, 0.266667, 0.0], rel=1e-5)
+    assert random_a.exchange_standardization_scores().tolist() == pytest.approx(random_b.exchange_standardization_scores().tolist())
+    assert sum(score > 0.0 for score in random_a.exchange_standardization_scores()) == 2
+
+
+def test_storage_class_mod3_uses_run_internal_good_index() -> None:
+    config = SimulationConfig(
+        goods=6,
+        base_good_id_offset=0,
+        base_good_id_stride=3,
+        spoilage_rate=0.1,
+        experimental_storage_class_mode="mod3",
+    )
+
+    assert config.base_need_vector().tolist() == pytest.approx([1.0, 16.0, 49.0, 100.0, 169.0, 256.0])
+    assert config.storage_class_codes().tolist() == [0, 1, 2, 0, 1, 2]
+    assert config.storage_spoilage_rates().tolist() == pytest.approx([0.2, 0.1, 0.025, 0.2, 0.1, 0.025])
+    assert config.storage_target_multipliers().tolist() == pytest.approx([0.5, 1.0, 2.0, 0.5, 1.0, 2.0])
+
+
+def test_storage_class_rare_good_makes_lowest_demand_quartile_well_storable() -> None:
+    config = SimulationConfig(
+        goods=8,
+        base_good_id_offset=0,
+        base_good_id_stride=3,
+        spoilage_rate=0.1,
+        experimental_storage_class_mode="rare-good",
+    )
+
+    assert config.base_need_vector().tolist() == pytest.approx([1.0, 16.0, 49.0, 100.0, 169.0, 256.0, 361.0, 484.0])
+    assert config.storage_class_codes().tolist() == [2, 2, 1, 1, 1, 1, 1, 1]
+    assert config.storage_spoilage_rates().tolist() == pytest.approx([0.025, 0.025, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+    assert config.storage_target_multipliers().tolist() == pytest.approx([2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])

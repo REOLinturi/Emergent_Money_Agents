@@ -372,7 +372,7 @@
             <div id="goodsStats" class="chart-values small"></div>
             <table>
               <thead>
-                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Share of agents holding the good above own consumption scale.">Excess holders</th><th title="Share of agents both buying and selling the good in recent history.">Round trips</th><th title="Mean local score that can justify exchange-media reserve from direct acquaintance observations.">Liq score</th><th title="Total would-be exchange-media reserve pressure under the current local evidence.">Reserve gap</th><th title="Share of agent-good cells where own purchase threshold does not exceed own sales threshold.">Spread ok</th><th title="Share of observed flow handled by agents currently in consumer role for this good. High values look more like final consumption chains than exchange media.">Cons flow</th></tr>
+                <tr><th title="Good identifier.">Good</th><th title="1 means the rarest base-demand good.">Demand rank</th><th title="Product storability class and its spoilage/target parameters.">Storage</th><th title="Wide circulation plus high TCE loss relative to need.">Media score</th><th title="Media score adjusted toward non-consumption flow, merchant round trips, and seller specialization.">Pure media</th><th title="Transaction-cost loss divided by the good's current consumption need scale.">TCE / need</th><th title="Share of agents with a local friend observation for this good.">Net breadth</th><th title="Share of agents holding the good above own consumption scale.">Excess holders</th><th title="Share of agents both buying and selling the good in recent history.">Round trips</th><th title="Share of agents currently in retailer role that both bought and sold this good recently.">Retail RT</th><th title="Passive signal for locally emerging standardization from friend experience and seller breadth.">Endog std</th><th title="Mean recent product experience visible through direct acquaintances.">Friend exp</th><th title="Mean seller-good specialization weighted by seller breadth and activity.">Seller spec</th><th title="Maximum share of known partners to whom one seller sold this good recently.">Top seller breadth</th><th title="Mean local score that can justify exchange-media reserve from direct acquaintance observations.">Liq score</th><th title="Total would-be exchange-media reserve pressure under the current local evidence.">Reserve gap</th><th title="Share of agent-good cells where own purchase threshold does not exceed own sales threshold.">Spread ok</th><th title="Share of observed flow handled by agents currently in consumer role for this good. High values look more like final consumption chains than exchange media.">Cons flow</th></tr>
               </thead>
               <tbody id="goodsTable"></tbody>
             </table>
@@ -431,6 +431,13 @@
       <span class="chart-chip"><span class="chart-swatch" style="background:${color}"></span>${esc(label)} ${esc(value)}</span>
     `;
     const goodLabel = item => `g${item.report_good_id ?? item.good_id}`;
+    const storageLabel = item => {
+      const code = Number(item?.storage_class ?? 1);
+      const label = code === 0 ? 'poor' : code === 2 ? 'good' : 'mid';
+      const spoil = item?.storage_spoilage_rate === undefined ? '' : ` s=${pct(item.storage_spoilage_rate)}`;
+      const target = item?.storage_target_multiplier === undefined ? '' : ` t=${num(item.storage_target_multiplier)}`;
+      return `${label}${spoil}${target}`;
+    };
     const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -443,6 +450,10 @@
       fulfilled: ['Fulfilled need', 'Share of base needs currently met. If this falls below 100%, utility and living-standard measures should be read as stressed because some direct needs are not being met.'],
       utility_proxy: ['Utility proxy', 'Average needs level recorded by the model. It tracks the scale of consumption opportunities, but it is not a full welfare measure because it does not directly price distribution, time burden, or transaction friction.'],
       living_mean: ['Living standard', 'Achieved consumption level expressed as a baseline multiplier. It is based on fulfilled current needs relative to the original baseline basket and does not include aspirational stock deficits.'],
+      fixed_basket_living: ['Fixed-basket living standard', 'Strict original-basket multiplier. It asks how many complete baseline baskets each agent could claim from the currently fulfilled goods. It is intentionally harsher than the elastic living-standard measure.'],
+      substitution_lift: ['Substitution lift', 'Ratio between the current elastic living-standard measure and the strict fixed-basket measure. High values mean welfare is coming from substituting toward a changed basket rather than receiving the original basket in the same proportions.'],
+      fixed_capacity_bound: ['Fixed-basket capacity', 'Offline planner diagnostic for the original basket. Greedy lower is a feasible specialization estimate; upper is an optimistic no-friction bound. Agents do not see this number.'],
+      elastic_capacity_bound: ['Elastic-basket capacity', 'Offline planner diagnostic using the current elastic demand mix. If this is much higher than fixed capacity, the current welfare path depends strongly on basket substitution. Agents do not see this number.'],
       living_gini: ['Living standard Gini', 'Inequality of the achieved baseline-multiplier living standard. 0 means equal; larger values mean the achieved consumption level is concentrated.'],
       living_spread: ['Living spread', 'Percentile spread of achieved living standard. This should not go negative; if p10 falls below 1, some agents fail even the baseline assumption.'],
       aspiration_balance: ['Aspirational balance', 'Surplus or deficit relative to the agent’s current expected lifestyle and stock position. This may be negative; it should not be read as negative consumption.'],
@@ -480,10 +491,10 @@
       chunk_target: ['Chunk target', 'Latest chunk start and target cycle parsed from the runner log. It helps distinguish slow progress from a stopped run.'],
       eta: ['ETA', 'Estimated remaining wall time using recent seconds per cycle from runner logs. Treat as approximate because cycle time can change.'],
       chart_macro: ['Macro path', 'Production and utility proxy are indexed to the first visible checkpoint so they can be compared on one scale. A rising production line with flat utility is a welfare/productivity divergence.'],
-      chart_welfare: ['Welfare path', 'Achieved living-standard percentiles are shown in baseline-multiplier units. Median tracks typical welfare; p10 shows distress at the lower tail; p90 shows upper-tail gains.'],
+      chart_welfare: ['Welfare path', 'Achieved living-standard percentiles are shown in baseline-multiplier units. The purple line appears for newer runs and shows strict fixed-basket median welfare, separated from elastic-basket welfare.'],
       chart_trade: ['Trade pulse', 'Accepted trade volume shows market activity. Inventory trade shows the portion associated with intermediation and stock-building, which may grow before welfare improves.'],
       chart_money: ['Monetary shift', 'Rare-money share shows whether rare goods act as exchange media through merchant-style intermediation. The blue line is a lighter approximation that does not rely on barter direction; it scores broad local circulation, stock over need, and transaction-cost loss relative to need. These aggregates are not visible to agents.'],
-      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Liq score and reserve gap are local-decision diagnostics: they show whether a good has enough directly observed acceptability to justify a reserve before we blame scoring or execution.'],
+      chart_goods: ['Exchange-media candidates', 'The table ranks goods by a lightweight ex post approximation: high TCE loss relative to consumption need, broad local friend observations, stock held above need scale, and balanced turnover. Endog std is passive diagnostics only: it estimates whether friend experience and seller breadth could support locally emerging standardization without any global money signal.'],
       chart_roles: ['Role mix by good', 'This table shows whether goods are mainly produced, consumed, or intermediated, and whether production is concentrated enough to indicate specialization.'],
     };
     const helpButton = (key, label) => helpText[key]
@@ -575,6 +586,10 @@
         indicatorSection('Living standard and effort', 'Welfare-oriented measures separated from gross production.', [
           card({ key: 'utility_proxy', label: 'Utility proxy', value: num(market.utility_proxy_total), detail: `needs ${num(market.average_needs_level)}` }),
           card({ key: 'living_mean', label: 'Living standard', value: num(inequality.living_standard_median), detail: `baseline multiplier | mean ${num(inequality.living_standard_mean)}` }),
+          card({ key: 'fixed_basket_living', label: 'Fixed-basket LS', value: num(inequality.fixed_basket_living_standard_median), detail: `original basket | mean ${num(inequality.fixed_basket_living_standard_mean)} | p90 ${num(inequality.fixed_basket_living_standard_p90)}` }),
+          card({ key: 'substitution_lift', label: 'Substitution lift', value: ratio(inequality.living_standard_mean, inequality.fixed_basket_living_standard_mean), detail: `elastic vs fixed | stored ${num(inequality.substitution_lift_mean)}` }),
+          card({ key: 'fixed_capacity_bound', label: 'Fixed capacity', value: num(inequality.fixed_basket_capacity_greedy_bound), detail: `greedy lower | upper ${num(inequality.fixed_basket_capacity_upper_bound)}` }),
+          card({ key: 'elastic_capacity_bound', label: 'Elastic capacity', value: num(inequality.elastic_basket_capacity_greedy_bound), detail: `greedy lower | upper ${num(inequality.elastic_basket_capacity_upper_bound)}` }),
           card({ key: 'living_gini', label: 'Living standard Gini', value: num(inequality.living_standard_gini), detail: `0 equal | p90/p10 ${ratio(inequality.living_standard_p90, inequality.living_standard_p10)}` }),
           card({ key: 'living_spread', label: 'Living spread', value: num(inequality.living_standard_p90), detail: `p10 ${num(inequality.living_standard_p10)} | p50 ${num(inequality.living_standard_median)} | p99 ${num(inequality.living_standard_p99)}` }),
           card({ key: 'aspiration_shortfall', label: 'Expectation shortfall', value: pct(inequality.aspiration_shortfall_share), detail: `deficit p90 ${num(inequality.aspiration_shortfall_p90)} | balance p10 ${num(inequality.aspiration_balance_p10)}` }),
@@ -646,11 +661,18 @@
         <tr class="${item.is_rare ? 'rare' : ''}">
           <td class="mono">${goodLabel(item)}</td>
           <td class="mono">${item.demand_rank}</td>
+          <td class="mono">${storageLabel(item)}</td>
           <td class="mono">${Number(item.exchange_media_score || 0).toFixed(3)}</td>
+          <td class="mono">${Number(item.intermediation_purity_score || 0).toFixed(3)}</td>
           <td class="mono">${num(item.relative_tce_loss)}</td>
           <td class="mono">${pct(item.network_circulation_breadth)}</td>
           <td class="mono">${pct(item.excess_stock_breadth)}</td>
           <td class="mono">${pct(item.round_trip_breadth)}</td>
+          <td class="mono">${pct(item.merchant_round_trip_breadth)}</td>
+          <td class="mono">${Number(item.endogenous_standardization_score || 0).toFixed(3)}</td>
+          <td class="mono">${Number(item.local_product_experience_score || 0).toFixed(3)}</td>
+          <td class="mono">${Number(item.seller_specialization_score || 0).toFixed(3)}</td>
+          <td class="mono">${pct(item.top_seller_breadth_share)}</td>
           <td class="mono">${Number(item.local_liquidity_score || 0).toFixed(3)}</td>
           <td class="mono">${num(item.exchange_media_reserve_gap)}</td>
           <td class="mono">${pct(item.exchange_media_spread_ok_share)}</td>
@@ -680,6 +702,7 @@
       drawLine($('welfareChart'), [
         { values: state.history.map(item => item.living_standard_median), color: '#185f49' },
         { values: state.history.map(item => item.living_standard_mean), color: '#aa5b32' },
+        { values: state.history.map(item => item.fixed_basket_living_standard_median ?? 0), color: '#6f4f94' },
         { values: state.history.map(item => item.living_standard_p10), color: '#9b3a31' },
         { values: state.history.map(item => item.living_standard_p90), color: '#4f6f94' },
       ]);
@@ -705,8 +728,13 @@
       const topCandidate = state.goods[0];
       $('goodsStats').innerHTML = [
         chartChip({ label: 'top', value: topCandidate ? `${goodLabel(topCandidate)} ${Number(topCandidate.exchange_media_score || 0).toFixed(3)}` : 'n/a', color: topCandidate?.is_rare ? '#844719' : '#185f49' }),
+        chartChip({ label: 'pure media', value: topCandidate ? Number(topCandidate.intermediation_purity_score || 0).toFixed(3) : 'n/a', color: '#6f4f94' }),
         chartChip({ label: 'excess holders', value: topCandidate ? pct(topCandidate.excess_stock_breadth) : 'n/a', color: '#4f6f94' }),
         chartChip({ label: 'round trips', value: topCandidate ? pct(topCandidate.round_trip_breadth) : 'n/a', color: '#185f49' }),
+        chartChip({ label: 'retail RT', value: topCandidate ? pct(topCandidate.merchant_round_trip_breadth) : 'n/a', color: '#88b69b' }),
+        chartChip({ label: 'endog std', value: topCandidate ? Number(topCandidate.endogenous_standardization_score || 0).toFixed(3) : 'n/a', color: '#c58b37' }),
+        chartChip({ label: 'seller spec', value: topCandidate ? Number(topCandidate.seller_specialization_score || 0).toFixed(3) : 'n/a', color: '#aa5b32' }),
+        chartChip({ label: 'seller breadth', value: topCandidate ? pct(topCandidate.top_seller_breadth_share) : 'n/a', color: '#844719' }),
         chartChip({ label: 'liq score', value: topCandidate ? Number(topCandidate.local_liquidity_score || 0).toFixed(3) : 'n/a', color: '#4f6f94' }),
         chartChip({ label: 'reserve gap', value: topCandidate ? num(topCandidate.exchange_media_reserve_gap) : 'n/a', color: '#c58b37' }),
         chartChip({ label: 'rare rows', value: `${rareCandidateCount}/${state.goods.length}`, color: '#844719' }),

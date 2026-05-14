@@ -357,6 +357,7 @@ def test_session_clearing_after_trade_replan_can_continue_session() -> None:
 
     state = engine.state
     market = state.market
+    state.base_need[...] = 1.0
     market.elastic_need[...] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
     state.needs_level[...] = 1.0
     state.friend_id[...] = np.array(

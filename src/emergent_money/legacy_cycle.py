@@ -15,6 +15,7 @@ from .legacy_search_backend import (
     build_exchange_search_backend,
     execute_exchange_planning,
     execute_exchange_search,
+    _effective_trade_transparency,
 )
 from .legacy_cycle_native import build_native_legacy_cycle_backend
 from .state import ROLE_CONSUMER, ROLE_PRODUCER, ROLE_RETAILER, SimulationState
@@ -105,6 +106,8 @@ class LegacyCycleRunner:
             raise RuntimeError("Exact legacy mechanics currently require the NumPy backend")
         self.market = self.state.market
         self.period_length = float(self.config.cycle_time_budget)
+        self._storage_spoilage_rates = self.config.storage_spoilage_rates().astype(np.float64, copy=False)
+        self._storage_target_multipliers = self.config.storage_target_multipliers().astype(np.float64, copy=False)
         self._friend_slot_maps = self._build_friend_slot_maps()
         self._exchange_search = exchange_search_backend or build_exchange_search_backend()
         self._native_cycle = build_native_legacy_cycle_backend(self)
@@ -779,12 +782,13 @@ class LegacyCycleRunner:
         self._end_agent_period(agent_id)
 
     def _evaluate_stock(self, agent_id: int) -> float:
-        elastic_need = self.market.elastic_need * self.state.needs_level[agent_id]
+        cycle_need = self._effective_need_vector(agent_id)
         wealth_minus_needs = self.period_length
         total_needs_value = 0.0
 
         for good_id in range(self.config.goods):
-            surplus_value = self.state.stock[agent_id, good_id] - (elastic_need[good_id] * self.config.max_needs_increase)
+            need_value = float(cycle_need[good_id])
+            surplus_value = self.state.stock[agent_id, good_id] - (need_value * self.config.max_needs_increase)
             if surplus_value < 0.0:
                 if self.state.purchased_last_period[agent_id, good_id] > (-1.0 * surplus_value):
                     surplus_value *= self.state.purchase_price[agent_id, good_id]
@@ -794,22 +798,22 @@ class LegacyCycleRunner:
                 if self.state.recent_sales[agent_id, good_id] > surplus_value:
                     cap = self.config.stock_limit_multiplier * (
                         (self.state.sold_this_period[agent_id, good_id] - self.state.sold_last_period[agent_id, good_id])
-                        + elastic_need[good_id]
+                        + need_value
                     )
                     surplus_value = min(surplus_value, cap)
                     surplus_value *= self.state.sales_price[agent_id, good_id]
                 else:
-                    surplus_value = min(surplus_value, elastic_need[good_id] * self.config.max_needs_increase)
+                    surplus_value = min(surplus_value, need_value * self.config.max_needs_increase)
                     surplus_value *= min(
                         float(self.state.purchase_price[agent_id, good_id]),
                         1.0 / max(float(self.state.efficiency[agent_id, good_id]), _EPSILON),
                     )
             wealth_minus_needs += surplus_value
 
-            if self.state.recent_purchases[agent_id, good_id] > elastic_need[good_id]:
-                total_needs_value += self.state.purchase_price[agent_id, good_id] * elastic_need[good_id]
+            if self.state.recent_purchases[agent_id, good_id] > need_value:
+                total_needs_value += self.state.purchase_price[agent_id, good_id] * need_value
             else:
-                total_needs_value += elastic_need[good_id] / max(float(self.state.efficiency[agent_id, good_id]), _EPSILON)
+                total_needs_value += need_value / max(float(self.state.efficiency[agent_id, good_id]), _EPSILON)
 
         if total_needs_value <= _EPSILON:
             return 1.0
@@ -842,10 +846,22 @@ class LegacyCycleRunner:
         self.state.need[agent_id] = need_row
         self.engine._cycle_need_total += float(np.sum(need_row))
 
+    def _effective_need_vector(self, agent_id: int, level: float | None = None) -> np.ndarray:
+        needs_level = max(float(self.state.needs_level[agent_id] if level is None else level), 1.0)
+        if not self.config.basic_round_elastic:
+            return self.state.base_need[agent_id].copy()
+        return self.state.base_need[agent_id] + (max(needs_level - 1.0, 0.0) * self.market.elastic_need)
+
+    def _effective_need_value(self, agent_id: int, good_id: int, level: float | None = None) -> float:
+        needs_level = max(float(self.state.needs_level[agent_id] if level is None else level), 1.0)
+        if not self.config.basic_round_elastic:
+            return float(self.state.base_need[agent_id, good_id])
+        return float(self.state.base_need[agent_id, good_id]) + (
+            max(needs_level - 1.0, 0.0) * float(self.market.elastic_need[good_id])
+        )
+
     def _baseline_cycle_need(self, agent_id: int) -> np.ndarray:
-        if self.config.basic_round_elastic and self.state.needs_level[agent_id] >= self.config.small_needs_increase:
-            return self.market.elastic_need * self.state.needs_level[agent_id]
-        return self.market.elastic_need.copy()
+        return self._effective_need_vector(agent_id)
 
     def _compute_leisure_extra_need(self, agent_id: int) -> np.ndarray | None:
         remaining_time = float(self.state.time_remaining[agent_id])
@@ -939,9 +955,7 @@ class LegacyCycleRunner:
         max_attempts = self.config.goods * self.config.acquaintances
 
         for need_good in range(self.config.goods):
-            if self.state.stock[agent_id, need_good] >= (
-                self.market.elastic_need[need_good] * self.state.needs_level[agent_id]
-            ):
+            if self.state.stock[agent_id, need_good] >= self._effective_need_value(agent_id, need_good):
                 continue
 
             # Legacy-C computes the gift matrix once per need and then keeps
@@ -1004,14 +1018,14 @@ class LegacyCycleRunner:
                 self.state.recent_sales[agent_id, need_good]
                 > (
                     self.state.recent_production[agent_id, need_good]
-                    - self.market.elastic_need[need_good]
+                    - self._effective_need_value(agent_id, need_good)
                 )
             )
             local_liquidity_signal = target_stock_limit > float(self.state.stock_limit[agent_id, need_good]) + _EPSILON
             aspirational_stock_signal = self._has_aspirational_stock_gap(agent_id, need_good, aspirational_target)
             if not (legacy_surplus_signal or local_liquidity_signal or aspirational_stock_signal):
                 continue
-            if self.state.stock[agent_id, need_good] >= (target_stock_limit - self.market.elastic_need[need_good]):
+            if self.state.stock[agent_id, need_good] >= (target_stock_limit - self._effective_need_value(agent_id, need_good)):
                 continue
 
             # Legacy-C likewise keeps the initially valid gift set for the
@@ -1117,7 +1131,7 @@ class LegacyCycleRunner:
                     executed_any = True
                 offer_exhausted = (
                     self.state.stock[agent_id, offer_good]
-                    <= self.market.elastic_need[offer_good] * self.state.needs_level[agent_id] + 1.0
+                    <= self._effective_need_value(agent_id, offer_good) + 1.0
                 )
                 if offer_exhausted and not self.config.experimental_session_pairwise_offer_exhaustion:
                     changed_forbidden = bool(
@@ -1664,9 +1678,7 @@ class LegacyCycleRunner:
 
     def _hybrid_exchange_need(self, *, agent_id: int, need_good: int, deal_type: int) -> float:
         if deal_type == _CONSUMPTION_DEAL:
-            if self.state.stock[agent_id, need_good] >= (
-                self.market.elastic_need[need_good] * self.state.needs_level[agent_id]
-            ):
+            if self.state.stock[agent_id, need_good] >= self._effective_need_value(agent_id, need_good):
                 return 0.0
             max_need = float(self.state.need[agent_id, need_good])
             if max_need < 1.0:
@@ -1682,16 +1694,16 @@ class LegacyCycleRunner:
             target_stock_limit = exchange_media_reserve_target
         legacy_surplus_signal = (
             self.state.recent_sales[agent_id, need_good]
-            > (
-                self.state.recent_production[agent_id, need_good]
-                - self.market.elastic_need[need_good]
+                > (
+                    self.state.recent_production[agent_id, need_good]
+                    - self._effective_need_value(agent_id, need_good)
+                )
             )
-        )
         local_liquidity_signal = target_stock_limit > float(self.state.stock_limit[agent_id, need_good]) + _EPSILON
         aspirational_stock_signal = self._has_aspirational_stock_gap(agent_id, need_good, aspirational_target)
         if not (legacy_surplus_signal or local_liquidity_signal or aspirational_stock_signal):
             return 0.0
-        if self.state.stock[agent_id, need_good] >= (target_stock_limit - self.market.elastic_need[need_good]):
+        if self.state.stock[agent_id, need_good] >= (target_stock_limit - self._effective_need_value(agent_id, need_good)):
             return 0.0
         return max(float(target_stock_limit - self.state.stock[agent_id, need_good]), 0.0)
 
@@ -1745,7 +1757,7 @@ class LegacyCycleRunner:
             return 0.0
 
         own_need_scale = max(
-            float(self.state.base_need[agent_id, good_id]) * float(self.state.needs_level[agent_id]),
+            self._effective_need_value(agent_id, good_id),
             float(self.config.min_trade_quantity),
         )
         local_need_window = max(own_need_scale * float(known_count) * float(max(self.config.history, 1)), _EPSILON)
@@ -1773,7 +1785,7 @@ class LegacyCycleRunner:
         known_mask = friend_row >= 0
         known_count = int(np.count_nonzero(known_mask))
         own_need_scale = max(
-            float(self.state.base_need[agent_id, good_id]) * float(self.state.needs_level[agent_id]),
+            self._effective_need_value(agent_id, good_id),
             float(self.config.min_trade_quantity),
         )
         observed_acceptance = 0.0
@@ -1803,11 +1815,7 @@ class LegacyCycleRunner:
         target_multiplier = float(self.config.experimental_aspirational_stock_target)
         if target_multiplier <= _EPSILON:
             return 0.0
-        own_need_target = (
-            float(self.market.elastic_need[good_id])
-            * float(self.state.needs_level[agent_id])
-            * target_multiplier
-        )
+        own_need_target = self._effective_need_value(agent_id, good_id) * target_multiplier
         return min(float(self.state.stock_limit[agent_id, good_id]), own_need_target)
 
     def _has_aspirational_stock_gap(self, agent_id: int, good_id: int, aspirational_target: float) -> bool:
@@ -1885,12 +1893,10 @@ class LegacyCycleRunner:
         )
 
     def _collect_base_offer_goods(self, agent_id: int) -> tuple[int, ...]:
-        elastic_need = self.market.elastic_need
         my_stock = self.state.stock[agent_id]
-        my_needs_level = self.state.needs_level[agent_id]
         offer_goods: list[int] = []
         for offer_good in range(self.config.goods):
-            if my_stock[offer_good] <= (elastic_need[offer_good] * my_needs_level + 1.0):
+            if my_stock[offer_good] <= (self._effective_need_value(agent_id, offer_good) + 1.0):
                 continue
             offer_goods.append(offer_good)
         return tuple(offer_goods)
@@ -2037,6 +2043,9 @@ class LegacyCycleRunner:
             sales_price=state.sales_price,
             needs_level=state.needs_level,
             transparency=state.transparency,
+            my_base_need=state.base_need[agent_id],
+            base_need=state.base_need,
+            standardization_scores=self.config.exchange_standardization_scores(),
         ), None
 
     def _find_best_exchange_with_reason(
@@ -2100,19 +2109,27 @@ class LegacyCycleRunner:
         friend_purchase_price = state.purchase_price[friend_id]
         friend_stock_limit = state.stock_limit[friend_id]
         my_transparency_row = state.transparency[agent_id, friend_slot]
-        my_needs_level = state.needs_level[agent_id]
-        friend_needs_level = state.needs_level[friend_id]
         my_need_purchase_price = my_purchase_price[need_good]
         my_offer_sales_price = my_sales_price[offer_good]
         friend_need_sales_price = friend_sales_price[need_good]
         friend_offer_purchase_price = friend_purchase_price[offer_good]
 
         if execution_plan is None:
-            need_transparency = my_transparency_row[need_good]
+            standardization_scores = self.config.exchange_standardization_scores()
+            need_transparency = _effective_trade_transparency(
+                my_transparency_row[need_good],
+                standardization_scores,
+                need_good,
+            )
             reciprocal_slot = self._find_friend_slot(friend_id, agent_id)
             receiving_transparency = self.config.initial_transparency
             if reciprocal_slot >= 0:
                 receiving_transparency = state.transparency[friend_id, reciprocal_slot, offer_good]
+            receiving_transparency = _effective_trade_transparency(
+                receiving_transparency,
+                standardization_scores,
+                offer_good,
+            )
 
             switch_average = (
                 (
@@ -2123,7 +2140,7 @@ class LegacyCycleRunner:
             ) / 2.0
 
             max_exchange = (
-                (my_stock[offer_good] - (my_needs_level * market.elastic_need[offer_good]))
+                (my_stock[offer_good] - self._effective_need_value(agent_id, offer_good))
                 * receiving_transparency
             ) / max(switch_average, _EPSILON)
             if max_exchange <= self.config.min_trade_quantity:
@@ -2131,7 +2148,7 @@ class LegacyCycleRunner:
 
             max_exchange = min(max_exchange, max_need)
             friend_supply = (
-                friend_stock[need_good] - (friend_needs_level * market.elastic_need[need_good])
+                friend_stock[need_good] - self._effective_need_value(friend_id, need_good)
             ) * need_transparency
             max_exchange = min(max_exchange, friend_supply)
             if max_exchange <= self.config.min_trade_quantity:
@@ -2143,7 +2160,7 @@ class LegacyCycleRunner:
                 if max_exchange <= self.config.min_trade_quantity:
                     return ExchangeExecutionResult(False, True, 'partner_capacity_below_min', 0.0)
             else:
-                immediate_need = (friend_needs_level * market.elastic_need[offer_good]) - friend_stock[offer_good]
+                immediate_need = self._effective_need_value(friend_id, offer_good) - friend_stock[offer_good]
                 max_exchange = min(max_exchange, immediate_need / max(switch_average, _EPSILON))
                 if max_exchange <= self.config.min_trade_quantity:
                     return ExchangeExecutionResult(False, True, 'partner_need_below_min', 0.0)
@@ -2382,8 +2399,11 @@ class LegacyCycleRunner:
         self.state.periodic_spoilage[agent_id] = 0.0
 
         for good_id in range(self.config.goods):
+            own_need_value = self._effective_need_value(agent_id, good_id)
+            storage_target_multiplier = float(self._storage_target_multipliers[good_id])
+            own_stock_days_target = self.config.stock_limit_multiplier * storage_target_multiplier * own_need_value
             target_stock_limit = (
-                (self.config.stock_limit_multiplier * (self.market.elastic_need[good_id] * self.state.needs_level[agent_id]))
+                own_stock_days_target
                 + self.state.recent_sales[agent_id, good_id]
             )
             lower_limit = self.config.max_stocklimit_decrease * float(self.state.previous_stock_limit[agent_id, good_id])
@@ -2421,10 +2441,11 @@ class LegacyCycleRunner:
             self._adjust_purchase_price(agent_id, good_id)
             self._adjust_sales_price(agent_id, good_id)
             self.state.spoilage[agent_id, good_id] = 0.0
-            if self.state.stock[agent_id, good_id] > (self.config.stock_limit_multiplier * self.market.elastic_need[good_id]):
+            spoilage_rate = float(self._storage_spoilage_rates[good_id])
+            if self.state.stock[agent_id, good_id] > own_stock_days_target:
                 if self.state.stock[agent_id, good_id] > (self.config.stock_spoil_threshold * self.state.stock_limit[agent_id, good_id]):
                     if self.state.stock[agent_id, good_id] > self.state.stock_limit[agent_id, good_id]:
-                        spoiled = (self.state.stock[agent_id, good_id] - self.state.stock_limit[agent_id, good_id]) * self.config.spoilage_rate
+                        spoiled = (self.state.stock[agent_id, good_id] - self.state.stock_limit[agent_id, good_id]) * spoilage_rate
                         self.state.spoilage[agent_id, good_id] = spoiled
                         self.state.stock[agent_id, good_id] -= spoiled
                         self.state.periodic_spoilage[agent_id] += spoiled
@@ -2450,7 +2471,7 @@ class LegacyCycleRunner:
     def _adjust_purchase_price(self, agent_id: int, good_id: int) -> None:
         production_cost = 1.0 / max(float(self.state.efficiency[agent_id, good_id]), _EPSILON)
         surplus = float(self.state.stock[agent_id, good_id])
-        elastic_need = float(self.market.elastic_need[good_id])
+        elastic_need = self._effective_need_value(agent_id, good_id)
         stock_limit = float(self.state.stock_limit[agent_id, good_id])
         role = int(self.state.role[agent_id, good_id])
 
@@ -2501,7 +2522,7 @@ class LegacyCycleRunner:
         production_cost = 1.0 / max(float(self.state.efficiency[agent_id, good_id]), _EPSILON)
         previous_sales_price = float(self.state.sales_price[agent_id, good_id])
         surplus = float(self.state.stock[agent_id, good_id])
-        elastic_need = float(self.market.elastic_need[good_id])
+        elastic_need = self._effective_need_value(agent_id, good_id)
         stock_limit = float(self.state.stock_limit[agent_id, good_id])
         role = int(self.state.role[agent_id, good_id])
 
@@ -2568,19 +2589,14 @@ class LegacyCycleRunner:
         floor_fraction = self.config.use_value_price_floor_fraction
         floor = 0.0
         if floor_fraction > 0.0:
-            needs_level = max(float(self.state.needs_level[agent_id]), 1.0)
-            visible_need = (
-                float(self.market.elastic_need[good_id])
-                * needs_level
-                * float(self.config.history)
-            )
+            visible_need = self._effective_need_value(agent_id, good_id) * float(self.config.history)
             visible_capacity = max(
                 visible_need,
                 float(self.state.stock_limit[agent_id, good_id]),
                 float(self.config.min_trade_quantity),
             )
             survival_fraction = max(
-                (1.0 - float(self.config.spoilage_rate)) ** max(int(self.config.history), 1),
+                (1.0 - float(self._storage_spoilage_rates[good_id])) ** max(int(self.config.history), 1),
                 _EPSILON,
             )
             spoilage_adjusted_capacity = visible_capacity / survival_fraction
@@ -2620,23 +2636,94 @@ class LegacyCycleRunner:
         self.state.sales_price[agent_id, good_id] = sales_price
 
     def _calibrate_friend_transparency(self, agent_id: int) -> None:
+        recent_count_mode = self.config.experimental_transparency_learning_mode == "recent-count"
+        endogenous_strength = float(self.config.experimental_endogenous_standardization_strength)
+        endogenous_need_power = float(self.config.experimental_endogenous_standardization_need_power)
+        mean_base_need = max(float(np.mean(self.state.base_need[agent_id])), _EPSILON)
         for friend_slot in range(self.config.acquaintances):
             for good_id in range(self.config.goods):
                 transparency = self.config.initial_transparency
+                base_need = max(float(self.state.base_need[agent_id, good_id]), _EPSILON)
                 transactions = float(self.state.friend_activity[agent_id, friend_slot])
                 if transactions > 0.0:
                     transparency += ((1.0 - transparency) * 0.7) * (transactions / (transactions + self.config.goods))
-                purchased = float(self.state.friend_purchased[agent_id, friend_slot, good_id])
-                transparency += ((1.0 - transparency) * 0.7) * ((10.0 * purchased) / max((10.0 * purchased) + (self.engine.cycle + 1), _EPSILON))
-                recent_purchased = float(self.state.recent_purchases[agent_id, good_id])
-                transparency += ((1.0 - transparency) * 0.7) * (
-                    recent_purchased / max(recent_purchased + (10.0 * self.config.history), _EPSILON)
-                )
+                if recent_count_mode:
+                    product_transactions = float(
+                        self.state.friend_purchased[agent_id, friend_slot, good_id]
+                        + self.state.friend_sold[agent_id, friend_slot, good_id]
+                    )
+                    product_scale = float(max(self.config.history, 1))
+                    transparency += ((1.0 - transparency) * 0.7) * (
+                        product_transactions / max(product_transactions + product_scale, _EPSILON)
+                    )
+                else:
+                    purchased = float(self.state.friend_purchased[agent_id, friend_slot, good_id])
+                    purchased_need_multiples = purchased / max(base_need * float(self.engine.cycle + 1), _EPSILON)
+                    transparency += ((1.0 - transparency) * 0.7) * (
+                        (10.0 * purchased_need_multiples) / max((10.0 * purchased_need_multiples) + 1.0, _EPSILON)
+                    )
+                    recent_purchased = float(self.state.recent_purchases[agent_id, good_id])
+                    recent_need_multiples = recent_purchased / max(base_need * float(max(self.config.history, 1)), _EPSILON)
+                    transparency += ((1.0 - transparency) * 0.7) * (
+                        recent_need_multiples / max(recent_need_multiples + 1.0, _EPSILON)
+                    )
+                if endogenous_strength > 0.0:
+                    direct_friend_id = int(self.state.friend_id[agent_id, friend_slot])
+                    if direct_friend_id >= 0:
+                        need_scale = self._endogenous_standardization_need_scale(
+                            base_need=base_need,
+                            mean_base_need=mean_base_need,
+                            need_power=endogenous_need_power,
+                        )
+                        experience = float(self.state.reputation_product_experience[direct_friend_id, good_id])
+                        seller_activity = float(self.state.reputation_seller_activity[direct_friend_id, good_id])
+                        seller_breadth = float(self.state.reputation_seller_breadth[direct_friend_id, good_id])
+                        experience_signal = experience / max(experience + need_scale, _EPSILON)
+                        seller_activity_signal = seller_activity / max(seller_activity + need_scale, _EPSILON)
+                        seller_signal = sqrt(max(seller_breadth, 0.0) * seller_activity_signal)
+                        standardization_signal = min(
+                            max(0.5 * experience_signal + 0.5 * seller_signal, 0.0),
+                            1.0,
+                        )
+                        transparency += ((1.0 - transparency) * endogenous_strength) * standardization_signal
                 if self.state.talent_mask[agent_id, good_id] > 0.0:
                     transparency += (1.0 - transparency) * 0.5
                 self.state.transparency[agent_id, friend_slot, good_id] = min(float(transparency), 1.0)
-            if self.state.friend_activity[agent_id, friend_slot] > 1.0:
+            if recent_count_mode:
+                self.state.friend_activity[agent_id, friend_slot] *= self.config.activity_discount
+                self.state.friend_purchased[agent_id, friend_slot, :] *= self.config.activity_discount
+                self.state.friend_sold[agent_id, friend_slot, :] *= self.config.activity_discount
+            elif self.state.friend_activity[agent_id, friend_slot] > 1.0:
                 self.state.friend_activity[agent_id, friend_slot] *= 0.9
+        if endogenous_strength > 0.0:
+            self._refresh_reputation_signals(agent_id)
+
+    def _endogenous_standardization_need_scale(
+        self,
+        *,
+        base_need: float,
+        mean_base_need: float,
+        need_power: float,
+    ) -> float:
+        need_ratio = max(base_need / max(mean_base_need, _EPSILON), _EPSILON)
+        return max(float(self.config.history) * (need_ratio ** need_power), 1.0)
+
+    def _refresh_reputation_signals(self, agent_id: int) -> None:
+        known_mask = self.state.friend_id[agent_id] >= 0
+        known_count = int(np.count_nonzero(known_mask))
+        if known_count <= 0:
+            self.state.reputation_product_experience[agent_id, :] = 0.0
+            self.state.reputation_seller_activity[agent_id, :] = 0.0
+            self.state.reputation_seller_breadth[agent_id, :] = 0.0
+            return
+
+        purchased = self.state.friend_purchased[agent_id, known_mask, :].astype(np.float64, copy=False)
+        sold = self.state.friend_sold[agent_id, known_mask, :].astype(np.float64, copy=False)
+        self.state.reputation_product_experience[agent_id, :] = np.sum(purchased + sold, axis=0).astype(np.float32)
+        self.state.reputation_seller_activity[agent_id, :] = np.sum(sold, axis=0).astype(np.float32)
+        self.state.reputation_seller_breadth[agent_id, :] = (
+            np.count_nonzero(sold > _EPSILON, axis=0).astype(np.float32) / float(known_count)
+        )
 
     def _evaluate_market_prices(self) -> None:
         self.market.price_average = 0.0

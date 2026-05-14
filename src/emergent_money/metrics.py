@@ -77,6 +77,15 @@ class MetricsSnapshot:
     tce_share_of_time_budget: float = 0.0
     spoilage_share_of_time_budget: float = 0.0
     friction_share_of_time_budget: float = 0.0
+    fixed_basket_living_standard_mean: float = 0.0
+    fixed_basket_living_standard_median: float = 0.0
+    fixed_basket_living_standard_p10: float = 0.0
+    fixed_basket_living_standard_p90: float = 0.0
+    substitution_lift_mean: float = 0.0
+    fixed_basket_capacity_upper_bound: float = 0.0
+    fixed_basket_capacity_greedy_bound: float = 0.0
+    elastic_basket_capacity_upper_bound: float = 0.0
+    elastic_basket_capacity_greedy_bound: float = 0.0
 
 
 def compute_metrics(

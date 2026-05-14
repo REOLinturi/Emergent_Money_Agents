@@ -19,6 +19,38 @@ _PLAN_REASON_BY_CODE = {
 _PLAN_CODE_BY_REASON = {reason: code for code, reason in _PLAN_REASON_BY_CODE.items()}
 
 
+def _effective_need_value(
+    *,
+    elastic_need: np.ndarray,
+    needs_level: np.ndarray,
+    good_id: int,
+    agent_id: int | None = None,
+    base_need: np.ndarray | None = None,
+    base_need_row: np.ndarray | None = None,
+    level: float | None = None,
+) -> float:
+    level_value = float(needs_level[agent_id]) if level is None and agent_id is not None else float(level or 1.0)
+    level_value = max(level_value, 1.0)
+    if base_need_row is not None:
+        base_value = float(base_need_row[good_id])
+    elif base_need is not None and agent_id is not None:
+        base_value = float(base_need[agent_id, good_id])
+    else:
+        base_value = float(elastic_need[good_id])
+    return base_value + (max(level_value - 1.0, 0.0) * float(elastic_need[good_id]))
+
+
+def _effective_trade_transparency(raw_transparency: float, standardization_scores: np.ndarray | None, good_id: int) -> float:
+    if standardization_scores is None or good_id < 0 or good_id >= len(standardization_scores):
+        return float(raw_transparency)
+    standardization = float(standardization_scores[good_id])
+    if standardization <= 0.0:
+        return float(raw_transparency)
+    raw = min(max(float(raw_transparency), 0.0), 1.0)
+    standardization = min(max(standardization, 0.0), 1.0)
+    return raw + ((1.0 - raw) * standardization)
+
+
 @dataclass(slots=True, frozen=True)
 class ExchangeSearchResult:
     score: float
@@ -49,6 +81,9 @@ class ExchangeSearchRequest:
     sales_price: np.ndarray
     needs_level: np.ndarray
     transparency: np.ndarray
+    my_base_need: np.ndarray | None = None
+    base_need: np.ndarray | None = None
+    standardization_scores: np.ndarray | None = None
 
     def as_kwargs(self) -> dict[str, Any]:
         return {
@@ -72,6 +107,9 @@ class ExchangeSearchRequest:
             'sales_price': self.sales_price,
             'needs_level': self.needs_level,
             'transparency': self.transparency,
+            'my_base_need': self.my_base_need,
+            'base_need': self.base_need,
+            'standardization_scores': self.standardization_scores,
         }
 
 
@@ -145,6 +183,9 @@ class ExchangeSearchBackend(Protocol):
         sales_price: np.ndarray,
         needs_level: np.ndarray,
         transparency: np.ndarray,
+        my_base_need: np.ndarray | None = None,
+        base_need: np.ndarray | None = None,
+        standardization_scores: np.ndarray | None = None,
     ) -> ExchangeSearchResult | None: ...
 
     def plan_best_exchange(self, request: ExchangePlanRequest) -> ExchangePlanningOutcome | None: ...
@@ -177,6 +218,9 @@ class PythonExchangeSearchBackend:
         sales_price: np.ndarray,
         needs_level: np.ndarray,
         transparency: np.ndarray,
+        my_base_need: np.ndarray | None = None,
+        base_need: np.ndarray | None = None,
+        standardization_scores: np.ndarray | None = None,
     ) -> ExchangeSearchResult | None:
         my_need_purchase_price = my_purchase_price[need_good]
         my_need_is_producer = my_role[need_good] == ROLE_PRODUCER
@@ -196,12 +240,23 @@ class PythonExchangeSearchBackend:
             friend_purchase_price = purchase_price[friend_id]
             friend_sales_price = sales_price[friend_id]
             friend_needs_level = needs_level[friend_id]
-            if friend_stock[need_good] <= (elastic_need[need_good] * friend_needs_level + 1.0):
+            friend_need_scale = _effective_need_value(
+                elastic_need=elastic_need,
+                needs_level=needs_level,
+                base_need=base_need,
+                agent_id=friend_id,
+                good_id=need_good,
+            )
+            if friend_stock[need_good] <= (friend_need_scale + 1.0):
                 continue
 
             reciprocal_slot = int(reciprocal_slots[friend_slot])
             friend_transparency = transparency[friend_id, reciprocal_slot] if reciprocal_slot >= 0 else None
-            need_transparency = my_transparency[friend_slot, need_good]
+            need_transparency = _effective_trade_transparency(
+                my_transparency[friend_slot, need_good],
+                standardization_scores,
+                need_good,
+            )
             friend_need_role = float(friend_role[need_good])
             friend_need_sales_price = friend_sales_price[need_good]
 
@@ -210,13 +265,24 @@ class PythonExchangeSearchBackend:
                 if friend_role[offer_good] == ROLE_RETAILER:
                     gift_max_level = float(friend_stock_limit[offer_good]) - 1.0
                 else:
-                    gift_max_level = float(elastic_need[offer_good] * friend_needs_level) - 1.0
+                    gift_max_level = _effective_need_value(
+                        elastic_need=elastic_need,
+                        needs_level=needs_level,
+                        base_need=base_need,
+                        agent_id=friend_id,
+                        good_id=offer_good,
+                    ) - 1.0
                 if friend_stock[offer_good] >= gift_max_level:
                     continue
 
                 receiving_transparency = initial_transparency
                 if friend_transparency is not None:
                     receiving_transparency = friend_transparency[offer_good]
+                receiving_transparency = _effective_trade_transparency(
+                    receiving_transparency,
+                    standardization_scores,
+                    offer_good,
+                )
 
                 score = (
                     (friend_purchase_price[offer_good] / max(friend_need_sales_price, _EPSILON))
@@ -283,6 +349,9 @@ class NativeModuleExchangeSearchBackend:
         sales_price: np.ndarray,
         needs_level: np.ndarray,
         transparency: np.ndarray,
+        my_base_need: np.ndarray | None = None,
+        base_need: np.ndarray | None = None,
+        standardization_scores: np.ndarray | None = None,
     ) -> ExchangeSearchResult | None:
         result = self._native_module.find_best_exchange(
             goods=goods,
@@ -316,8 +385,16 @@ class NativeModuleExchangeSearchBackend:
         )
 
     def plan_best_exchange(self, request: ExchangePlanRequest) -> ExchangePlanningOutcome | None:
-        if hasattr(self._native_module, 'plan_best_exchange'):
-            result = self._native_module.plan_best_exchange(**request.as_kwargs())
+        if (
+            request.search_request.base_need is None
+            and request.search_request.my_base_need is None
+            and hasattr(self._native_module, 'plan_best_exchange')
+        ):
+            payload = request.as_kwargs()
+            payload.pop('base_need', None)
+            payload.pop('my_base_need', None)
+            payload.pop('standardization_scores', None)
+            result = self._native_module.plan_best_exchange(**payload)
             if result is None:
                 return None
             reason_code = int(result[0])
@@ -346,7 +423,6 @@ class NativeModuleExchangeSearchBackend:
                 plan_result=plan_result,
                 failure_reason=failure_reason,
             )
-
         search_result = self.find_best_exchange(**request.search_request.as_kwargs())
         if search_result is None:
             return None
@@ -376,9 +452,19 @@ def _build_exchange_plan_result(
     friend_slot = search_result.friend_slot
     reciprocal_slot = int(search_request.reciprocal_slots[friend_slot])
     need_transparency = float(search_request.my_transparency[friend_slot, need_good])
+    need_transparency = _effective_trade_transparency(
+        need_transparency,
+        search_request.standardization_scores,
+        need_good,
+    )
     receiving_transparency = float(search_request.initial_transparency)
     if reciprocal_slot >= 0:
         receiving_transparency = float(search_request.transparency[friend_id, reciprocal_slot, offer_good])
+    receiving_transparency = _effective_trade_transparency(
+        receiving_transparency,
+        search_request.standardization_scores,
+        offer_good,
+    )
 
     my_need_purchase_price = float(search_request.my_purchase_price[need_good])
     my_offer_sales_price = float(search_request.my_sales_price[offer_good])
@@ -393,11 +479,17 @@ def _build_exchange_plan_result(
         + ((my_need_purchase_price * receiving_transparency) / max(my_offer_sales_price, _EPSILON))
     ) / 2.0
 
-    friend_needs_level = float(search_request.needs_level[friend_id])
+    my_offer_need = _effective_need_value(
+        elastic_need=search_request.elastic_need,
+        needs_level=search_request.needs_level,
+        base_need_row=search_request.my_base_need,
+        good_id=offer_good,
+        level=search_request.my_needs_level,
+    )
     max_exchange = (
         (
             float(search_request.my_stock[offer_good])
-            - (float(search_request.elastic_need[offer_good]) * search_request.my_needs_level)
+            - my_offer_need
         )
         * receiving_transparency
     ) / max(switch_average, _EPSILON)
@@ -405,9 +497,16 @@ def _build_exchange_plan_result(
         return None, 'offer_surplus_below_min'
 
     max_exchange = min(max_exchange, request.max_need)
+    friend_need_scale = _effective_need_value(
+        elastic_need=search_request.elastic_need,
+        needs_level=search_request.needs_level,
+        base_need=search_request.base_need,
+        agent_id=friend_id,
+        good_id=need_good,
+    )
     friend_supply = (
         float(search_request.stock[friend_id, need_good])
-        - (friend_needs_level * float(search_request.elastic_need[need_good]))
+        - friend_need_scale
     ) * need_transparency
     max_exchange = min(max_exchange, friend_supply)
     if max_exchange <= request.min_trade_quantity:
@@ -419,8 +518,12 @@ def _build_exchange_plan_result(
         if max_exchange <= request.min_trade_quantity:
             return None, 'partner_capacity_below_min'
     else:
-        immediate_need = (
-            friend_needs_level * float(search_request.elastic_need[offer_good])
+        immediate_need = _effective_need_value(
+            elastic_need=search_request.elastic_need,
+            needs_level=search_request.needs_level,
+            base_need=search_request.base_need,
+            agent_id=friend_id,
+            good_id=offer_good,
         ) - float(search_request.stock[friend_id, offer_good])
         max_exchange = min(max_exchange, immediate_need / max(switch_average, _EPSILON))
         if max_exchange <= request.min_trade_quantity:

@@ -24,6 +24,175 @@ const PLAN_ROUNDING_BUFFER_BELOW_MIN: i32 = 5;
 const PARALLEL_SEARCH_MIN_CELLS: usize = 8_192;
 const PARALLEL_BASKET_MIN_CELLS: usize = 65_536;
 
+fn endogenous_standardization_need_scale(
+    base_need_value: f64,
+    mean_base_need: f64,
+    history: i32,
+    need_power: f64,
+) -> f64 {
+    let need_ratio = (base_need_value / mean_base_need.max(EPSILON as f64)).max(EPSILON as f64);
+    ((history.max(1) as f64) * need_ratio.powf(need_power.max(0.0))).max(1.0)
+}
+
+fn endogenous_standardization_signal(
+    experience: f64,
+    seller_activity: f64,
+    seller_breadth: f64,
+    need_scale: f64,
+) -> f64 {
+    let experience_signal = experience / (experience + need_scale).max(EPSILON as f64);
+    let seller_activity_signal =
+        seller_activity / (seller_activity + need_scale).max(EPSILON as f64);
+    let seller_signal = seller_breadth.max(0.0) * seller_activity_signal;
+    (0.5 * experience_signal + 0.5 * seller_signal.sqrt()).clamp(0.0, 1.0)
+}
+
+fn refresh_reputation_signals_internal(
+    agent_id: usize,
+    goods: usize,
+    acquaintances: usize,
+    friend_id: ArrayView2<'_, i32>,
+    friend_purchased: ArrayView3<'_, f32>,
+    friend_sold: ArrayView3<'_, f32>,
+    mut reputation_product_experience: ArrayViewMut2<'_, f32>,
+    mut reputation_seller_activity: ArrayViewMut2<'_, f32>,
+    mut reputation_seller_breadth: ArrayViewMut2<'_, f32>,
+) {
+    let mut known_count = 0_usize;
+    for friend_slot in 0..acquaintances {
+        if friend_id[[agent_id, friend_slot]] >= 0 {
+            known_count += 1;
+        }
+    }
+
+    if known_count == 0 {
+        for good_id in 0..goods {
+            reputation_product_experience[[agent_id, good_id]] = 0.0;
+            reputation_seller_activity[[agent_id, good_id]] = 0.0;
+            reputation_seller_breadth[[agent_id, good_id]] = 0.0;
+        }
+        return;
+    }
+
+    let known_count_f = known_count as f32;
+    for good_id in 0..goods {
+        let mut product_experience = 0.0_f32;
+        let mut seller_activity = 0.0_f32;
+        let mut seller_breadth = 0_usize;
+        for friend_slot in 0..acquaintances {
+            if friend_id[[agent_id, friend_slot]] < 0 {
+                continue;
+            }
+            let sold = friend_sold[[agent_id, friend_slot, good_id]];
+            let purchased = friend_purchased[[agent_id, friend_slot, good_id]];
+            product_experience += purchased + sold;
+            seller_activity += sold;
+            if sold > EPSILON {
+                seller_breadth += 1;
+            }
+        }
+        reputation_product_experience[[agent_id, good_id]] = product_experience;
+        reputation_seller_activity[[agent_id, good_id]] = seller_activity;
+        reputation_seller_breadth[[agent_id, good_id]] = (seller_breadth as f32) / known_count_f;
+    }
+}
+
+fn effective_need_value(
+    base_need: ArrayView2<'_, f32>,
+    elastic_need: ArrayView1<'_, f32>,
+    needs_level: ArrayView1<'_, f32>,
+    agent_id: usize,
+    good_id: usize,
+) -> f32 {
+    if agent_id >= base_need.nrows()
+        || good_id >= base_need.ncols()
+        || good_id >= elastic_need.len()
+    {
+        return 0.0;
+    }
+    let extra_level = (needs_level[agent_id] - 1.0).max(0.0);
+    base_need[[agent_id, good_id]] + (extra_level * elastic_need[good_id])
+}
+
+fn standardization_for_good(standardization_scores: &[f32], good_id: usize) -> f32 {
+    if good_id >= standardization_scores.len() {
+        return 0.0;
+    }
+    let score = standardization_scores[good_id];
+    if !score.is_finite() {
+        0.0
+    } else {
+        score.clamp(0.0, 1.0)
+    }
+}
+
+fn effective_trade_transparency(
+    raw_transparency: f32,
+    standardization_scores: &[f32],
+    good_id: usize,
+) -> f32 {
+    let standardization = standardization_for_good(standardization_scores, good_id);
+    if standardization <= 0.0 {
+        return raw_transparency;
+    }
+    let raw = raw_transparency.clamp(0.0, 1.0);
+    raw + ((1.0 - raw) * standardization)
+}
+
+fn effective_trade_transparency_f64(
+    raw_transparency: f64,
+    standardization_scores: &[f32],
+    good_id: usize,
+) -> f64 {
+    effective_trade_transparency(raw_transparency as f32, standardization_scores, good_id) as f64
+}
+
+fn extract_standardization_scores(config: &Bound<'_, PyAny>, goods: usize) -> PyResult<Vec<f32>> {
+    let scores_obj = config.call_method0("exchange_standardization_scores")?;
+    let scores_array: PyReadonlyArray1<'_, f32> = scores_obj.extract()?;
+    let mut scores = scores_array.as_array().to_vec();
+    if scores.len() < goods {
+        scores.resize(goods, 0.0);
+    }
+    for score in scores.iter_mut().take(goods) {
+        if !score.is_finite() {
+            *score = 0.0;
+        } else {
+            *score = score.clamp(0.0, 1.0);
+        }
+    }
+    Ok(scores)
+}
+
+fn extract_config_f32_vector(
+    config: &Bound<'_, PyAny>,
+    method_name: &str,
+    goods: usize,
+    default_value: f32,
+) -> PyResult<Vec<f32>> {
+    let values_obj = config.call_method0(method_name)?;
+    let values_array: PyReadonlyArray1<'_, f32> = values_obj.extract()?;
+    let mut values = values_array.as_array().to_vec();
+    if values.len() < goods {
+        values.resize(goods, default_value);
+    }
+    for value in values.iter_mut().take(goods) {
+        if !value.is_finite() {
+            *value = default_value;
+        }
+    }
+    Ok(values)
+}
+
+fn vector_value_or_default(values: &[f32], good_id: usize, default_value: f64) -> f64 {
+    values
+        .get(good_id)
+        .copied()
+        .filter(|value| value.is_finite())
+        .map(f64::from)
+        .unwrap_or(default_value)
+}
+
 fn mul_assign_like_numpy_float32(value: f64, factor: f64) -> f64 {
     ((value as f32) * (factor as f32)) as f64
 }
@@ -518,6 +687,7 @@ fn search_best_exchange_all_offer_goods_internal(
     goods: usize,
     need_good: usize,
     initial_transparency: f32,
+    standardization_scores: &[f32],
     forbidden_offer_by_need: &[bool],
     available_offer_goods: &[usize],
     friend_ids: ArrayView1<'_, i32>,
@@ -528,7 +698,9 @@ fn search_best_exchange_all_offer_goods_internal(
     my_role: ArrayView1<'_, i32>,
     my_transparency: ArrayView2<'_, f32>,
     my_needs_level: f32,
+    my_base_need: ArrayView1<'_, f32>,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -550,6 +722,7 @@ fn search_best_exchange_all_offer_goods_internal(
             goods,
             need_good,
             initial_transparency,
+            standardization_scores,
             forbidden_offer_by_need,
             available_offer_goods,
             friend_ids,
@@ -559,7 +732,9 @@ fn search_best_exchange_all_offer_goods_internal(
             my_role,
             my_transparency,
             my_needs_level,
+            my_base_need,
             elastic_need,
+            base_need,
             stock,
             role,
             stock_limit,
@@ -579,8 +754,9 @@ fn search_best_exchange_all_offer_goods_internal(
             continue;
         }
         let fid = friend_id as usize;
-        let friend_needs_level = needs_level[fid];
-        if stock[[fid, need_good]] <= (elastic_need[need_good] * friend_needs_level + 1.0) {
+        let friend_need_scale =
+            effective_need_value(base_need, elastic_need, needs_level, fid, need_good);
+        if stock[[fid, need_good]] <= (friend_need_scale + 1.0) {
             continue;
         }
 
@@ -592,14 +768,20 @@ fn search_best_exchange_all_offer_goods_internal(
             {
                 continue;
             }
-            if my_stock[offer_good] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
+            let my_offer_need = if offer_good < my_base_need.len() {
+                my_base_need[offer_good]
+                    + ((my_needs_level - 1.0).max(0.0) * elastic_need[offer_good])
+            } else {
+                0.0
+            };
+            if my_stock[offer_good] <= (my_offer_need + 1.0) {
                 continue;
             }
 
             let gift_max_level = if role[[fid, offer_good]] == ROLE_RETAILER {
                 stock_limit[[fid, offer_good]] - 1.0
             } else {
-                elastic_need[offer_good] * friend_needs_level - 1.0
+                effective_need_value(base_need, elastic_need, needs_level, fid, offer_good) - 1.0
             };
             if stock[[fid, offer_good]] >= gift_max_level {
                 continue;
@@ -611,7 +793,16 @@ fn search_best_exchange_all_offer_goods_internal(
             } else {
                 initial_transparency
             };
-            let need_transparency = my_transparency[[friend_slot, need_good]];
+            let receiving_transparency = effective_trade_transparency(
+                receiving_transparency,
+                standardization_scores,
+                offer_good,
+            );
+            let need_transparency = effective_trade_transparency(
+                my_transparency[[friend_slot, need_good]],
+                standardization_scores,
+                need_good,
+            );
             let friend_need_role = role[[fid, need_good]] as f32;
             let friend_need_sales_price = sales_price[[fid, need_good]];
 
@@ -657,6 +848,7 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
     goods: usize,
     need_good: usize,
     initial_transparency: f32,
+    standardization_scores: &[f32],
     forbidden_offer_by_need: &[bool],
     available_offer_goods: &[usize],
     friend_ids: ArrayView1<'_, i32>,
@@ -666,7 +858,9 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
     my_role: ArrayView1<'_, i32>,
     my_transparency: ArrayView2<'_, f32>,
     my_needs_level: f32,
+    my_base_need: ArrayView1<'_, f32>,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -685,8 +879,9 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
                 return None;
             }
             let fid = friend_id as usize;
-            let friend_needs_level = needs_level[fid];
-            if stock[[fid, need_good]] <= (elastic_need[need_good] * friend_needs_level + 1.0) {
+            let friend_need_scale =
+                effective_need_value(base_need, elastic_need, needs_level, fid, need_good);
+            if stock[[fid, need_good]] <= (friend_need_scale + 1.0) {
                 return None;
             }
 
@@ -700,14 +895,21 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
                 {
                     continue;
                 }
-                if my_stock[offer_good] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
+                let my_offer_need = if offer_good < my_base_need.len() {
+                    my_base_need[offer_good]
+                        + ((my_needs_level - 1.0).max(0.0) * elastic_need[offer_good])
+                } else {
+                    0.0
+                };
+                if my_stock[offer_good] <= (my_offer_need + 1.0) {
                     continue;
                 }
 
                 let gift_max_level = if role[[fid, offer_good]] == ROLE_RETAILER {
                     stock_limit[[fid, offer_good]] - 1.0
                 } else {
-                    elastic_need[offer_good] * friend_needs_level - 1.0
+                    effective_need_value(base_need, elastic_need, needs_level, fid, offer_good)
+                        - 1.0
                 };
                 if stock[[fid, offer_good]] >= gift_max_level {
                     continue;
@@ -719,7 +921,16 @@ fn search_best_exchange_all_offer_goods_internal_parallel(
                 } else {
                     initial_transparency
                 };
-                let need_transparency = my_transparency[[friend_slot, need_good]];
+                let receiving_transparency = effective_trade_transparency(
+                    receiving_transparency,
+                    standardization_scores,
+                    offer_good,
+                );
+                let need_transparency = effective_trade_transparency(
+                    my_transparency[[friend_slot, need_good]],
+                    standardization_scores,
+                    need_good,
+                );
                 let friend_need_role = role[[fid, need_good]] as f32;
                 let friend_need_sales_price = sales_price[[fid, need_good]];
 
@@ -844,6 +1055,7 @@ fn plan_exchange_basket(
     exchange_media_reserve_bias: f64,
     exchange_media_reserve_min_acceptance: f64,
     exchange_media_reserve_bootstrap_floor: f64,
+    standardization_scores: PyReadonlyArray1<'_, f32>,
     disable_offer_prefilter: bool,
     market_elastic_need: PyReadonlyArray1<'_, f32>,
     base_need: PyReadonlyArray2<'_, f32>,
@@ -886,6 +1098,10 @@ fn plan_exchange_basket(
     let recent_inventory_inflow = recent_inventory_inflow.as_array();
     let recent_production = recent_production.as_array();
     let friend_sold = friend_sold.as_array();
+    let mut standardization_scores = standardization_scores.as_array().to_vec();
+    if standardization_scores.len() < goods {
+        standardization_scores.resize(goods, 0.0);
+    }
 
     if agent_id >= stock.nrows()
         || goods > stock.ncols()
@@ -926,6 +1142,7 @@ fn plan_exchange_basket(
         agent_id,
         goods,
         elastic_need,
+        base_need,
         stock,
         needs_level,
         disable_offer_prefilter,
@@ -958,6 +1175,7 @@ fn plan_exchange_basket(
                         exchange_media_reserve_bias,
                         exchange_media_reserve_min_acceptance,
                         exchange_media_reserve_bootstrap_floor,
+                        &standardization_scores,
                         forbidden_offer_slice,
                         &available_offer_goods,
                         elastic_need,
@@ -1005,6 +1223,7 @@ fn plan_exchange_basket(
                         exchange_media_reserve_bias,
                         exchange_media_reserve_min_acceptance,
                         exchange_media_reserve_bootstrap_floor,
+                        &standardization_scores,
                         forbidden_offer_slice,
                         &available_offer_goods,
                         elastic_need,
@@ -1076,7 +1295,14 @@ fn plan_exchange_basket(
                     if offer_good == need_good || forbidden_offer_by_need[[need_good, offer_good]] {
                         continue;
                     }
-                    if my_stock[offer_good] <= ((elastic_need[offer_good] * my_needs_level) + 1.0) {
+                    let offer_need = effective_need_value(
+                        base_need,
+                        elastic_need,
+                        needs_level,
+                        agent_id,
+                        offer_good,
+                    );
+                    if my_stock[offer_good] <= (offer_need + 1.0) {
                         continue;
                     }
                     candidate_offer_goods.push(offer_good as i32);
@@ -1221,8 +1447,15 @@ fn plan_agent_parallel_phenomenon_candidates(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
-    let available_offer_goods =
-        collect_available_offer_goods(agent_id, goods, elastic_need, stock, needs_level, false);
+    let available_offer_goods = collect_available_offer_goods(
+        agent_id,
+        goods,
+        elastic_need,
+        base_need,
+        stock,
+        needs_level,
+        false,
+    );
     if available_offer_goods.is_empty() {
         return Vec::new();
     }
@@ -1277,6 +1510,7 @@ fn plan_agent_parallel_phenomenon_candidates(
                 exchange_media_reserve_bias,
                 exchange_media_reserve_min_acceptance,
                 exchange_media_reserve_bootstrap_floor,
+                &[],
                 &forbidden_offer_by_need,
                 &available_offer_goods,
                 elastic_need,
@@ -1320,10 +1554,12 @@ fn plan_agent_parallel_phenomenon_candidates(
                 agent_id,
                 need_good,
                 initial_transparency_for_execution,
+                &[],
                 max_need,
                 min_trade_quantity,
                 trade_rounding_buffer,
                 elastic_need,
+                base_need,
                 stock,
                 role,
                 stock_limit,
@@ -1435,8 +1671,15 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
     let my_role = role.row(agent_id);
     let my_transparency = transparency.index_axis(Axis(0), agent_id);
     let my_needs_level = needs_level[agent_id];
-    let available_offer_goods =
-        collect_available_offer_goods(agent_id, goods, elastic_need, stock, needs_level, false);
+    let available_offer_goods = collect_available_offer_goods(
+        agent_id,
+        goods,
+        elastic_need,
+        base_need,
+        stock,
+        needs_level,
+        false,
+    );
     if available_offer_goods.is_empty() {
         return Vec::new();
     }
@@ -1491,6 +1734,7 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
                 exchange_media_reserve_bias,
                 exchange_media_reserve_min_acceptance,
                 exchange_media_reserve_bootstrap_floor,
+                &[],
                 &forbidden_offer_by_need,
                 &available_offer_goods,
                 elastic_need,
@@ -1534,10 +1778,12 @@ fn plan_agent_parallel_phenomenon_candidates_cached_links(
                 agent_id,
                 need_good,
                 initial_transparency_for_execution,
+                &[],
                 max_need,
                 min_trade_quantity,
                 trade_rounding_buffer,
                 elastic_need,
+                base_need,
                 stock,
                 role,
                 stock_limit,
@@ -1981,6 +2227,8 @@ fn end_agent_period(
     stock_limit_multiplier: f64,
     activity_discount: f64,
     spoilage_rate: f64,
+    storage_spoilage_rates: PyReadonlyArray1<'_, f32>,
+    storage_target_multipliers: PyReadonlyArray1<'_, f32>,
     stock_spoil_threshold: f64,
     price_reduction: f64,
     price_hike: f64,
@@ -2020,12 +2268,20 @@ fn end_agent_period(
     mut purchase_price: PyReadwriteArray2<'_, f32>,
     mut sales_price: PyReadwriteArray2<'_, f32>,
     mut friend_activity: PyReadwriteArray2<'_, f32>,
-    friend_purchased: PyReadonlyArray3<'_, f32>,
+    mut friend_purchased: PyReadwriteArray3<'_, f32>,
+    mut friend_sold: PyReadwriteArray3<'_, f32>,
+    friend_id: PyReadonlyArray2<'_, i32>,
+    mut reputation_product_experience: PyReadwriteArray2<'_, f32>,
+    mut reputation_seller_activity: PyReadwriteArray2<'_, f32>,
+    mut reputation_seller_breadth: PyReadwriteArray2<'_, f32>,
     mut transparency: PyReadwriteArray3<'_, f32>,
     needs_level: PyReadonlyArray1<'_, f32>,
     market_elastic_need: PyReadonlyArray1<'_, f32>,
     mut market_periodic_spoilage: PyReadwriteArray1<'_, f32>,
     use_value_price_floor_fraction: f64,
+    transparency_recent_count: bool,
+    endogenous_standardization_strength: f64,
+    endogenous_standardization_need_power: f64,
     legacy_price_floor: Option<f64>,
 ) -> PyResult<()> {
     let epsilon64 = EPSILON as f64;
@@ -2059,18 +2315,42 @@ fn end_agent_period(
     let mut purchase_price = purchase_price.as_array_mut();
     let mut sales_price = sales_price.as_array_mut();
     let mut friend_activity = friend_activity.as_array_mut();
-    let friend_purchased = friend_purchased.as_array();
+    let mut friend_purchased = friend_purchased.as_array_mut();
+    let mut friend_sold = friend_sold.as_array_mut();
+    let friend_id = friend_id.as_array();
+    let mut reputation_product_experience = reputation_product_experience.as_array_mut();
+    let mut reputation_seller_activity = reputation_seller_activity.as_array_mut();
+    let mut reputation_seller_breadth = reputation_seller_breadth.as_array_mut();
     let mut transparency = transparency.as_array_mut();
     let needs_level = needs_level.as_array();
     let market_elastic_need = market_elastic_need.as_array();
     let mut market_periodic_spoilage = market_periodic_spoilage.as_array_mut();
+    let storage_spoilage_rates = storage_spoilage_rates.as_array().to_vec();
+    let storage_target_multipliers = storage_target_multipliers.as_array().to_vec();
 
     periodic_spoilage[agent_id] = 0.0;
+    let mut mean_base_need = 0.0_f64;
+    for good_id in 0..goods {
+        mean_base_need += base_need[[agent_id, good_id]] as f64;
+    }
+    mean_base_need = (mean_base_need / (goods.max(1) as f64)).max(epsilon64);
 
     for good_id in 0..goods {
-        let elastic_component = market_elastic_need[good_id] * needs_level[agent_id];
-        let target_stock_limit = (stock_limit_multiplier * (elastic_component as f64))
-            + (recent_sales[[agent_id, good_id]] as f64);
+        let effective_need = effective_need_value(
+            base_need,
+            market_elastic_need,
+            needs_level,
+            agent_id,
+            good_id,
+        ) as f64;
+        let storage_target_multiplier =
+            vector_value_or_default(&storage_target_multipliers, good_id, 1.0).max(0.0);
+        let spoilage_rate_for_good =
+            vector_value_or_default(&storage_spoilage_rates, good_id, spoilage_rate)
+                .clamp(0.0, 1.0);
+        let own_stock_days_target =
+            stock_limit_multiplier * storage_target_multiplier * effective_need;
+        let target_stock_limit = own_stock_days_target + (recent_sales[[agent_id, good_id]] as f64);
         let lower_limit =
             max_stocklimit_decrease * (previous_stock_limit[[agent_id, good_id]] as f64);
         let upper_limit =
@@ -2115,16 +2395,17 @@ fn end_agent_period(
 
         let production_cost = 1.0_f64 / (efficiency[[agent_id, good_id]] as f64).max(epsilon64);
         let surplus = stock[[agent_id, good_id]] as f64;
-        let elastic_need = market_elastic_need[good_id] as f64;
+        let elastic_need = effective_need;
         let stock_limit_value = stock_limit[[agent_id, good_id]] as f64;
         let mut price_floor = 0.0_f64;
         if use_value_price_floor_fraction > 0.0 {
-            let needs_level_value = (needs_level[agent_id] as f64).max(1.0);
-            let visible_need = elastic_need * needs_level_value * (history as f64);
+            let visible_need = effective_need * (history as f64);
             let visible_capacity = visible_need
                 .max(stock_limit_value)
                 .max(min_trade_quantity.max(epsilon64));
-            let survival_fraction = (1.0 - spoilage_rate).powi(history.max(1)).max(epsilon64);
+            let survival_fraction = (1.0 - spoilage_rate_for_good)
+                .powi(history.max(1))
+                .max(epsilon64);
             let spoilage_adjusted_capacity = visible_capacity / survival_fraction;
             let stock_value = surplus.max(0.0);
             let inventory_factor = if stock_value > spoilage_adjusted_capacity {
@@ -2276,12 +2557,12 @@ fn end_agent_period(
                         ((purchase_price[[agent_id, good_id]] as f64) * 2.0).min(production_cost);
                 }
             } else if role_value == ROLE_RETAILER {
-                if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                     sales_price_value =
                         mul_assign_like_numpy_float32(sales_price_value, price_reduction);
                 }
             } else if role_value == ROLE_PRODUCER {
-                if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                     sales_price_value = production_cost;
                 } else if sales_price_value < production_cost {
                     sales_price_value = price_hike * production_cost;
@@ -2290,7 +2571,7 @@ fn end_agent_period(
         } else if role_value == ROLE_CONSUMER {
             sales_price_value = mul_assign_like_numpy_float32(sales_price_value, price_reduction);
         } else if role_value == ROLE_RETAILER {
-            if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+            if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                 if sales_price_value > purchase_price[[agent_id, good_id]] as f64 {
                     sales_price_value = purchase_price[[agent_id, good_id]] as f64;
                 } else {
@@ -2299,7 +2580,7 @@ fn end_agent_period(
                 }
             }
         } else if role_value == ROLE_PRODUCER {
-            if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+            if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                 if sold_this_period[[agent_id, good_id]] <= min_trade_quantity as f32 {
                     if sales_price_value > production_cost {
                         sales_price_value = production_cost;
@@ -2337,16 +2618,14 @@ fn end_agent_period(
         sales_price[[agent_id, good_id]] = sales_price_value as f32;
 
         spoilage[[agent_id, good_id]] = 0.0;
-        if (stock[[agent_id, good_id]] as f64)
-            > (stock_limit_multiplier * (market_elastic_need[good_id] as f64))
-        {
+        if (stock[[agent_id, good_id]] as f64) > own_stock_days_target {
             if (stock[[agent_id, good_id]] as f64)
                 > (stock_spoil_threshold * (stock_limit[[agent_id, good_id]] as f64))
             {
                 if stock[[agent_id, good_id]] > stock_limit[[agent_id, good_id]] {
                     let spoiled = ((stock[[agent_id, good_id]] as f64)
                         - (stock_limit[[agent_id, good_id]] as f64))
-                        * spoilage_rate;
+                        * spoilage_rate_for_good;
                     spoilage[[agent_id, good_id]] = spoiled as f32;
                     stock[[agent_id, good_id]] -= spoiled as f32;
                     periodic_spoilage[agent_id] += spoiled as f32;
@@ -2379,21 +2658,78 @@ fn end_agent_period(
                 transparency_value += ((1.0 - transparency_value) * 0.7)
                     * (transactions / (transactions + goods as f64));
             }
-            let purchased = friend_purchased[[agent_id, friend_slot, good_id]] as f64;
-            transparency_value += ((1.0 - transparency_value) * 0.7)
-                * ((10.0 * purchased) / ((10.0 * purchased) + (cycle + 1) as f64).max(epsilon64));
-            let recent_purchased_value = recent_purchases[[agent_id, good_id]] as f64;
-            transparency_value += ((1.0 - transparency_value) * 0.7)
-                * (recent_purchased_value
-                    / (recent_purchased_value + (10.0 * history as f64)).max(epsilon64));
+            if transparency_recent_count {
+                let product_transactions = (friend_purchased[[agent_id, friend_slot, good_id]]
+                    + friend_sold[[agent_id, friend_slot, good_id]])
+                    as f64;
+                let product_scale = history.max(1) as f64;
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * (product_transactions
+                        / (product_transactions + product_scale).max(epsilon64));
+            } else {
+                let original_need = (base_need[[agent_id, good_id]] as f64).max(epsilon64);
+                let purchased = friend_purchased[[agent_id, friend_slot, good_id]] as f64;
+                let purchased_need_multiples =
+                    purchased / (original_need * (cycle + 1) as f64).max(epsilon64);
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * ((10.0 * purchased_need_multiples)
+                        / ((10.0 * purchased_need_multiples) + 1.0).max(epsilon64));
+                let recent_purchased_value = recent_purchases[[agent_id, good_id]] as f64;
+                let recent_need_multiples =
+                    recent_purchased_value / (original_need * history.max(1) as f64).max(epsilon64);
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * (recent_need_multiples / (recent_need_multiples + 1.0).max(epsilon64));
+            }
+            if endogenous_standardization_strength > 0.0 {
+                let direct_friend_id = friend_id[[agent_id, friend_slot]];
+                if direct_friend_id >= 0 {
+                    let direct_friend_id = direct_friend_id as usize;
+                    let base_need_value = (base_need[[agent_id, good_id]] as f64).max(epsilon64);
+                    let need_scale = endogenous_standardization_need_scale(
+                        base_need_value,
+                        mean_base_need,
+                        history,
+                        endogenous_standardization_need_power,
+                    );
+                    let signal = endogenous_standardization_signal(
+                        reputation_product_experience[[direct_friend_id, good_id]] as f64,
+                        reputation_seller_activity[[direct_friend_id, good_id]] as f64,
+                        reputation_seller_breadth[[direct_friend_id, good_id]] as f64,
+                        need_scale,
+                    );
+                    transparency_value +=
+                        ((1.0 - transparency_value) * endogenous_standardization_strength)
+                            * signal;
+                }
+            }
             if talent_mask[[agent_id, good_id]] > 0.0 {
                 transparency_value += (1.0 - transparency_value) * 0.5;
             }
             transparency[[agent_id, friend_slot, good_id]] = transparency_value.min(1.0) as f32;
         }
-        if friend_activity[[agent_id, friend_slot]] > 1.0 {
+        if transparency_recent_count {
+            friend_activity[[agent_id, friend_slot]] *= activity_discount as f32;
+            for good_id in 0..goods {
+                friend_purchased[[agent_id, friend_slot, good_id]] *= activity_discount as f32;
+                friend_sold[[agent_id, friend_slot, good_id]] *= activity_discount as f32;
+            }
+        } else if friend_activity[[agent_id, friend_slot]] > 1.0 {
             friend_activity[[agent_id, friend_slot]] *= 0.9;
         }
+    }
+
+    if endogenous_standardization_strength > 0.0 {
+        refresh_reputation_signals_internal(
+            agent_id,
+            goods,
+            acquaintances,
+            friend_id,
+            friend_purchased.view(),
+            friend_sold.view(),
+            reputation_product_experience.view_mut(),
+            reputation_seller_activity.view_mut(),
+            reputation_seller_breadth.view_mut(),
+        );
     }
 
     Ok(())
@@ -2699,6 +3035,8 @@ fn end_agent_period_internal(
     stock_limit_multiplier: f64,
     activity_discount: f64,
     spoilage_rate: f64,
+    storage_spoilage_rates: &[f32],
+    storage_target_multipliers: &[f32],
     stock_spoil_threshold: f64,
     price_reduction: f64,
     price_hike: f64,
@@ -2738,21 +3076,45 @@ fn end_agent_period_internal(
     mut purchase_price: ArrayViewMut2<'_, f32>,
     mut sales_price: ArrayViewMut2<'_, f32>,
     mut friend_activity: ArrayViewMut2<'_, f32>,
-    friend_purchased: ArrayView3<'_, f32>,
+    mut friend_purchased: ArrayViewMut3<'_, f32>,
+    mut friend_sold: ArrayViewMut3<'_, f32>,
+    friend_id: ArrayView2<'_, i32>,
+    mut reputation_product_experience: ArrayViewMut2<'_, f32>,
+    mut reputation_seller_activity: ArrayViewMut2<'_, f32>,
+    mut reputation_seller_breadth: ArrayViewMut2<'_, f32>,
     mut transparency: ArrayViewMut3<'_, f32>,
     needs_level: ArrayView1<'_, f32>,
     market_elastic_need: ArrayView1<'_, f32>,
     mut market_periodic_spoilage: ArrayViewMut1<'_, f32>,
     use_value_price_floor_fraction: f64,
     legacy_price_floor: Option<f64>,
+    transparency_recent_count: bool,
+    endogenous_standardization_strength: f64,
+    endogenous_standardization_need_power: f64,
 ) {
     let epsilon64 = EPSILON as f64;
     periodic_spoilage[agent_id] = 0.0;
+    let mut mean_base_need = 0.0_f64;
+    for good_id in 0..goods {
+        mean_base_need += base_need[[agent_id, good_id]] as f64;
+    }
+    mean_base_need = (mean_base_need / (goods.max(1) as f64)).max(epsilon64);
 
     for good_id in 0..goods {
-        let elastic_component = market_elastic_need[good_id] * needs_level[agent_id];
-        let target_stock_limit = (stock_limit_multiplier * (elastic_component as f64))
-            + (recent_sales[[agent_id, good_id]] as f64);
+        let effective_need = effective_need_value(
+            base_need,
+            market_elastic_need,
+            needs_level,
+            agent_id,
+            good_id,
+        ) as f64;
+        let storage_target_multiplier =
+            vector_value_or_default(storage_target_multipliers, good_id, 1.0).max(0.0);
+        let spoilage_rate_for_good =
+            vector_value_or_default(storage_spoilage_rates, good_id, spoilage_rate).clamp(0.0, 1.0);
+        let own_stock_days_target =
+            stock_limit_multiplier * storage_target_multiplier * effective_need;
+        let target_stock_limit = own_stock_days_target + (recent_sales[[agent_id, good_id]] as f64);
         let lower_limit =
             max_stocklimit_decrease * (previous_stock_limit[[agent_id, good_id]] as f64);
         let upper_limit =
@@ -2797,16 +3159,17 @@ fn end_agent_period_internal(
 
         let production_cost = 1.0_f64 / (efficiency[[agent_id, good_id]] as f64).max(epsilon64);
         let surplus = stock[[agent_id, good_id]] as f64;
-        let elastic_need = market_elastic_need[good_id] as f64;
+        let elastic_need = effective_need;
         let stock_limit_value = stock_limit[[agent_id, good_id]] as f64;
         let mut price_floor = 0.0_f64;
         if use_value_price_floor_fraction > 0.0 {
-            let needs_level_value = (needs_level[agent_id] as f64).max(1.0);
-            let visible_need = elastic_need * needs_level_value * (history as f64);
+            let visible_need = effective_need * (history as f64);
             let visible_capacity = visible_need
                 .max(stock_limit_value)
                 .max(min_trade_quantity.max(epsilon64));
-            let survival_fraction = (1.0 - spoilage_rate).powi(history.max(1)).max(epsilon64);
+            let survival_fraction = (1.0 - spoilage_rate_for_good)
+                .powi(history.max(1))
+                .max(epsilon64);
             let spoilage_adjusted_capacity = visible_capacity / survival_fraction;
             let stock_value = surplus.max(0.0);
             let inventory_factor = if stock_value > spoilage_adjusted_capacity {
@@ -2958,12 +3321,12 @@ fn end_agent_period_internal(
                         ((purchase_price[[agent_id, good_id]] as f64) * 2.0).min(production_cost);
                 }
             } else if role_value == ROLE_RETAILER {
-                if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                     sales_price_value =
                         mul_assign_like_numpy_float32(sales_price_value, price_reduction);
                 }
             } else if role_value == ROLE_PRODUCER {
-                if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+                if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                     sales_price_value = production_cost;
                 } else if sales_price_value < production_cost {
                     sales_price_value = price_hike * production_cost;
@@ -2972,7 +3335,7 @@ fn end_agent_period_internal(
         } else if role_value == ROLE_CONSUMER {
             sales_price_value = mul_assign_like_numpy_float32(sales_price_value, price_reduction);
         } else if role_value == ROLE_RETAILER {
-            if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+            if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                 if sales_price_value > purchase_price[[agent_id, good_id]] as f64 {
                     sales_price_value = purchase_price[[agent_id, good_id]] as f64;
                 } else {
@@ -2981,7 +3344,7 @@ fn end_agent_period_internal(
                 }
             }
         } else if role_value == ROLE_PRODUCER {
-            if sold_this_period[[agent_id, good_id]] < market_elastic_need[good_id] {
+            if sold_this_period[[agent_id, good_id]] < elastic_need as f32 {
                 if sold_this_period[[agent_id, good_id]] <= min_trade_quantity as f32 {
                     if sales_price_value > production_cost {
                         sales_price_value = production_cost;
@@ -3019,16 +3382,14 @@ fn end_agent_period_internal(
         sales_price[[agent_id, good_id]] = sales_price_value as f32;
 
         spoilage[[agent_id, good_id]] = 0.0;
-        if (stock[[agent_id, good_id]] as f64)
-            > (stock_limit_multiplier * (market_elastic_need[good_id] as f64))
-        {
+        if (stock[[agent_id, good_id]] as f64) > own_stock_days_target {
             if (stock[[agent_id, good_id]] as f64)
                 > (stock_spoil_threshold * (stock_limit[[agent_id, good_id]] as f64))
             {
                 if stock[[agent_id, good_id]] > stock_limit[[agent_id, good_id]] {
                     let spoiled = ((stock[[agent_id, good_id]] as f64)
                         - (stock_limit[[agent_id, good_id]] as f64))
-                        * spoilage_rate;
+                        * spoilage_rate_for_good;
                     spoilage[[agent_id, good_id]] = spoiled as f32;
                     stock[[agent_id, good_id]] -= spoiled as f32;
                     periodic_spoilage[agent_id] += spoiled as f32;
@@ -3061,21 +3422,78 @@ fn end_agent_period_internal(
                 transparency_value += ((1.0 - transparency_value) * 0.7)
                     * (transactions / (transactions + goods as f64));
             }
-            let purchased = friend_purchased[[agent_id, friend_slot, good_id]] as f64;
-            transparency_value += ((1.0 - transparency_value) * 0.7)
-                * ((10.0 * purchased) / ((10.0 * purchased) + (cycle + 1) as f64).max(epsilon64));
-            let recent_purchased_value = recent_purchases[[agent_id, good_id]] as f64;
-            transparency_value += ((1.0 - transparency_value) * 0.7)
-                * (recent_purchased_value
-                    / (recent_purchased_value + (10.0 * history as f64)).max(epsilon64));
+            if transparency_recent_count {
+                let product_transactions = (friend_purchased[[agent_id, friend_slot, good_id]]
+                    + friend_sold[[agent_id, friend_slot, good_id]])
+                    as f64;
+                let product_scale = history.max(1) as f64;
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * (product_transactions
+                        / (product_transactions + product_scale).max(epsilon64));
+            } else {
+                let original_need = (base_need[[agent_id, good_id]] as f64).max(epsilon64);
+                let purchased = friend_purchased[[agent_id, friend_slot, good_id]] as f64;
+                let purchased_need_multiples =
+                    purchased / (original_need * (cycle + 1) as f64).max(epsilon64);
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * ((10.0 * purchased_need_multiples)
+                        / ((10.0 * purchased_need_multiples) + 1.0).max(epsilon64));
+                let recent_purchased_value = recent_purchases[[agent_id, good_id]] as f64;
+                let recent_need_multiples =
+                    recent_purchased_value / (original_need * history.max(1) as f64).max(epsilon64);
+                transparency_value += ((1.0 - transparency_value) * 0.7)
+                    * (recent_need_multiples / (recent_need_multiples + 1.0).max(epsilon64));
+            }
+            if endogenous_standardization_strength > 0.0 {
+                let direct_friend_id = friend_id[[agent_id, friend_slot]];
+                if direct_friend_id >= 0 {
+                    let direct_friend_id = direct_friend_id as usize;
+                    let base_need_value = (base_need[[agent_id, good_id]] as f64).max(epsilon64);
+                    let need_scale = endogenous_standardization_need_scale(
+                        base_need_value,
+                        mean_base_need,
+                        history,
+                        endogenous_standardization_need_power,
+                    );
+                    let signal = endogenous_standardization_signal(
+                        reputation_product_experience[[direct_friend_id, good_id]] as f64,
+                        reputation_seller_activity[[direct_friend_id, good_id]] as f64,
+                        reputation_seller_breadth[[direct_friend_id, good_id]] as f64,
+                        need_scale,
+                    );
+                    transparency_value +=
+                        ((1.0 - transparency_value) * endogenous_standardization_strength)
+                            * signal;
+                }
+            }
             if talent_mask[[agent_id, good_id]] > 0.0 {
                 transparency_value += (1.0 - transparency_value) * 0.5;
             }
             transparency[[agent_id, friend_slot, good_id]] = transparency_value.min(1.0) as f32;
         }
-        if friend_activity[[agent_id, friend_slot]] > 1.0 {
+        if transparency_recent_count {
+            friend_activity[[agent_id, friend_slot]] *= activity_discount as f32;
+            for good_id in 0..goods {
+                friend_purchased[[agent_id, friend_slot, good_id]] *= activity_discount as f32;
+                friend_sold[[agent_id, friend_slot, good_id]] *= activity_discount as f32;
+            }
+        } else if friend_activity[[agent_id, friend_slot]] > 1.0 {
             friend_activity[[agent_id, friend_slot]] *= 0.9;
         }
+    }
+
+    if endogenous_standardization_strength > 0.0 {
+        refresh_reputation_signals_internal(
+            agent_id,
+            goods,
+            acquaintances,
+            friend_id,
+            friend_purchased.view(),
+            friend_sold.view(),
+            reputation_product_experience.view_mut(),
+            reputation_seller_activity.view_mut(),
+            reputation_seller_breadth.view_mut(),
+        );
     }
 }
 
@@ -3092,7 +3510,7 @@ fn prepare_agent_for_consumption_internal(
     small_needs_increase: f32,
     lifestyle_promotion_threshold: f32,
     small_needs_reduction: f32,
-    _base_need: ArrayView2<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     mut need: ArrayViewMut2<'_, f32>,
     mut stock: ArrayViewMut2<'_, f32>,
     purchase_price: ArrayView2<'_, f32>,
@@ -3109,13 +3527,18 @@ fn prepare_agent_for_consumption_internal(
     mut recent_needs_increment: ArrayViewMut1<'_, f32>,
     market_elastic_need: ArrayView1<'_, f32>,
 ) -> (f64, f64) {
-    let current_needs_level = needs_level[agent_id];
     let mut wealth_minus_needs = period_length;
     let mut total_needs_value = 0.0_f32;
 
     for good_id in 0..goods {
-        let elastic_need = market_elastic_need[good_id] * current_needs_level;
-        let mut surplus_value = stock[[agent_id, good_id]] - (elastic_need * max_needs_increase);
+        let need_value = effective_need_value(
+            base_need,
+            market_elastic_need,
+            needs_level.view(),
+            agent_id,
+            good_id,
+        );
+        let mut surplus_value = stock[[agent_id, good_id]] - (need_value * max_needs_increase);
         if surplus_value < 0.0 {
             if purchased_last_period[[agent_id, good_id]] > (-1.0 * surplus_value) {
                 surplus_value *= purchase_price[[agent_id, good_id]];
@@ -3125,20 +3548,20 @@ fn prepare_agent_for_consumption_internal(
         } else if recent_sales[[agent_id, good_id]] > surplus_value {
             let cap = stock_limit_multiplier
                 * ((sold_this_period[[agent_id, good_id]] - sold_last_period[[agent_id, good_id]])
-                    + elastic_need);
+                    + need_value);
             surplus_value = surplus_value.min(cap);
             surplus_value *= sales_price[[agent_id, good_id]];
         } else {
-            surplus_value = surplus_value.min(elastic_need * max_needs_increase);
+            surplus_value = surplus_value.min(need_value * max_needs_increase);
             surplus_value *= purchase_price[[agent_id, good_id]]
                 .min(1.0 / efficiency[[agent_id, good_id]].max(EPSILON));
         }
         wealth_minus_needs += surplus_value;
 
-        if recent_purchases[[agent_id, good_id]] > elastic_need {
-            total_needs_value += purchase_price[[agent_id, good_id]] * elastic_need;
+        if recent_purchases[[agent_id, good_id]] > need_value {
+            total_needs_value += purchase_price[[agent_id, good_id]] * need_value;
         } else {
-            total_needs_value += elastic_need / efficiency[[agent_id, good_id]].max(EPSILON);
+            total_needs_value += need_value / efficiency[[agent_id, good_id]].max(EPSILON);
         }
     }
 
@@ -3177,9 +3600,15 @@ fn prepare_agent_for_consumption_internal(
     let updated_level = needs_level[agent_id];
     for good_id in 0..goods {
         let need_value = if basic_round_elastic && updated_level >= small_needs_increase {
-            market_elastic_need[good_id] * updated_level
+            effective_need_value(
+                base_need,
+                market_elastic_need,
+                needs_level.view(),
+                agent_id,
+                good_id,
+            )
         } else {
-            market_elastic_need[good_id]
+            base_need[[agent_id, good_id]]
         };
         need[[agent_id, good_id]] = need_value;
         cycle_need_total += need_value;
@@ -3515,7 +3944,7 @@ fn prepare_agent_for_consumption(
     mut recent_needs_increment: PyReadwriteArray1<'_, f32>,
     market_elastic_need: PyReadonlyArray1<'_, f32>,
 ) -> PyResult<(f64, f64)> {
-    let _base_need = base_need.as_array();
+    let base_need = base_need.as_array();
     let mut need = need.as_array_mut();
     let mut stock = stock.as_array_mut();
     let purchase_price = purchase_price.as_array();
@@ -3532,13 +3961,18 @@ fn prepare_agent_for_consumption(
     let mut recent_needs_increment = recent_needs_increment.as_array_mut();
     let market_elastic_need = market_elastic_need.as_array();
 
-    let current_needs_level = needs_level[agent_id];
     let mut wealth_minus_needs = period_length;
     let mut total_needs_value = 0.0_f32;
 
     for good_id in 0..goods {
-        let elastic_need = market_elastic_need[good_id] * current_needs_level;
-        let mut surplus_value = stock[[agent_id, good_id]] - (elastic_need * max_needs_increase);
+        let need_value = effective_need_value(
+            base_need,
+            market_elastic_need,
+            needs_level.view(),
+            agent_id,
+            good_id,
+        );
+        let mut surplus_value = stock[[agent_id, good_id]] - (need_value * max_needs_increase);
         if surplus_value < 0.0 {
             if purchased_last_period[[agent_id, good_id]] > (-1.0 * surplus_value) {
                 surplus_value *= purchase_price[[agent_id, good_id]];
@@ -3548,20 +3982,20 @@ fn prepare_agent_for_consumption(
         } else if recent_sales[[agent_id, good_id]] > surplus_value {
             let cap = stock_limit_multiplier
                 * ((sold_this_period[[agent_id, good_id]] - sold_last_period[[agent_id, good_id]])
-                    + elastic_need);
+                    + need_value);
             surplus_value = surplus_value.min(cap);
             surplus_value *= sales_price[[agent_id, good_id]];
         } else {
-            surplus_value = surplus_value.min(elastic_need * max_needs_increase);
+            surplus_value = surplus_value.min(need_value * max_needs_increase);
             surplus_value *= purchase_price[[agent_id, good_id]]
                 .min(1.0 / efficiency[[agent_id, good_id]].max(EPSILON));
         }
         wealth_minus_needs += surplus_value;
 
-        if recent_purchases[[agent_id, good_id]] > elastic_need {
-            total_needs_value += purchase_price[[agent_id, good_id]] * elastic_need;
+        if recent_purchases[[agent_id, good_id]] > need_value {
+            total_needs_value += purchase_price[[agent_id, good_id]] * need_value;
         } else {
-            total_needs_value += elastic_need / efficiency[[agent_id, good_id]].max(EPSILON);
+            total_needs_value += need_value / efficiency[[agent_id, good_id]].max(EPSILON);
         }
     }
 
@@ -3600,9 +4034,15 @@ fn prepare_agent_for_consumption(
     let updated_level = needs_level[agent_id];
     for good_id in 0..goods {
         let need_value = if basic_round_elastic && updated_level >= small_needs_increase {
-            market_elastic_need[good_id] * updated_level
+            effective_need_value(
+                base_need,
+                market_elastic_need,
+                needs_level.view(),
+                agent_id,
+                good_id,
+            )
         } else {
-            market_elastic_need[good_id]
+            base_need[[agent_id, good_id]]
         };
         need[[agent_id, good_id]] = need_value;
         cycle_need_total += need_value;
@@ -3919,6 +4359,7 @@ fn plan_exchange_stage_candidate(
     min_trade_quantity: f64,
     trade_rounding_buffer: f64,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -3971,19 +4412,21 @@ fn plan_exchange_stage_candidate(
             / my_offer_sales_price.max(EPSILON as f64)))
         / 2.0;
 
-    let my_needs_level = needs_level[agent_id] as f64;
-    let friend_needs_level = needs_level[fid] as f64;
-    let mut max_exchange = (((stock[[agent_id, offer_good]] as f64)
-        - ((elastic_need[offer_good] as f64) * my_needs_level))
+    let my_offer_need =
+        effective_need_value(base_need, elastic_need, needs_level, agent_id, offer_good) as f64;
+    let friend_need_scale =
+        effective_need_value(base_need, elastic_need, needs_level, fid, need_good) as f64;
+    let friend_offer_need =
+        effective_need_value(base_need, elastic_need, needs_level, fid, offer_good) as f64;
+    let mut max_exchange = (((stock[[agent_id, offer_good]] as f64) - my_offer_need)
         * receiving_transparency)
         / switch_average.max(EPSILON as f64);
     let reason_code = if max_exchange <= min_trade_quantity {
         PLAN_OFFER_SURPLUS_BELOW_MIN
     } else {
         max_exchange = max_exchange.min(max_need);
-        let friend_supply = ((stock[[fid, need_good]] as f64)
-            - (friend_needs_level * (elastic_need[need_good] as f64)))
-            * need_transparency;
+        let friend_supply =
+            ((stock[[fid, need_good]] as f64) - friend_need_scale) * need_transparency;
         max_exchange = max_exchange.min(friend_supply);
         if max_exchange <= min_trade_quantity {
             PLAN_FRIEND_SUPPLY_BELOW_MIN
@@ -4001,8 +4444,7 @@ fn plan_exchange_stage_candidate(
                 }
             }
         } else {
-            let immediate_need = (friend_needs_level * (elastic_need[offer_good] as f64))
-                - (stock[[fid, offer_good]] as f64);
+            let immediate_need = friend_offer_need - (stock[[fid, offer_good]] as f64);
             max_exchange = max_exchange.min(immediate_need / switch_average.max(EPSILON as f64));
             if max_exchange <= min_trade_quantity {
                 PLAN_PARTNER_NEED_BELOW_MIN
@@ -4055,8 +4497,10 @@ fn basket_stage_max_need(
     friend_sold: ArrayView3<'_, f32>,
     transparency: ArrayView3<'_, f32>,
 ) -> f64 {
+    let current_need =
+        effective_need_value(base_need, elastic_need, needs_level, agent_id, need_good) as f64;
     if deal_type == CONSUMPTION_DEAL {
-        if stock[[agent_id, need_good]] >= (elastic_need[need_good] * needs_level[agent_id]) {
+        if (stock[[agent_id, need_good]] as f64) >= current_need {
             return 0.0;
         }
         let max_need = need[[agent_id, need_good]] as f64;
@@ -4108,6 +4552,7 @@ fn basket_stage_max_need(
         need_good,
         aspirational_stock_target,
         elastic_need,
+        base_need,
         stock_limit,
         needs_level,
     );
@@ -4115,7 +4560,7 @@ fn basket_stage_max_need(
         .max(aspirational_target)
         .max(exchange_media_reserve_target);
     let legacy_surplus_signal = recent_sales[[agent_id, need_good]]
-        > (recent_production[[agent_id, need_good]] - elastic_need[need_good]);
+        > (recent_production[[agent_id, need_good]] - current_need as f32);
     let local_liquidity_signal =
         target_stock_limit > (stock_limit[[agent_id, need_good]] as f64) + (EPSILON as f64);
     let aspirational_stock_signal = aspirational_target > EPSILON as f64
@@ -4123,9 +4568,7 @@ fn basket_stage_max_need(
     if !(legacy_surplus_signal || local_liquidity_signal || aspirational_stock_signal) {
         return 0.0;
     }
-    if (stock[[agent_id, need_good]] as f64)
-        >= target_stock_limit - (elastic_need[need_good] as f64)
-    {
+    if (stock[[agent_id, need_good]] as f64) >= target_stock_limit - current_need {
         return 0.0;
     }
     (target_stock_limit - (stock[[agent_id, need_good]] as f64)).max(0.0)
@@ -4136,6 +4579,7 @@ fn aspirational_stock_target_for_good(
     good_id: usize,
     aspirational_stock_target: f64,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock_limit: ArrayView2<'_, f32>,
     needs_level: ArrayView1<'_, f32>,
 ) -> f64 {
@@ -4143,7 +4587,8 @@ fn aspirational_stock_target_for_good(
         return 0.0;
     }
     let own_need_target =
-        (elastic_need[good_id] as f64) * (needs_level[agent_id] as f64) * aspirational_stock_target;
+        (effective_need_value(base_need, elastic_need, needs_level, agent_id, good_id) as f64)
+            * aspirational_stock_target;
     own_need_target
         .min(stock_limit[[agent_id, good_id]] as f64)
         .max(0.0)
@@ -4311,17 +4756,20 @@ fn exchange_media_reserve_stock_scale(
         0.0
     };
     let own_turnover = (recent_sales[[agent_id, good_id]] as f64)
-        .min((recent_purchases[[agent_id, good_id]] + recent_inventory_inflow[[agent_id, good_id]]) as f64)
+        .min(
+            (recent_purchases[[agent_id, good_id]] + recent_inventory_inflow[[agent_id, good_id]])
+                as f64,
+        )
         .max(0.0);
     let mut own_exchange_budget = 0.0_f64;
     for other_good in 0..recent_purchases.ncols() {
-        own_exchange_budget +=
-            (recent_purchases[[agent_id, other_good]] + recent_inventory_inflow[[agent_id, other_good]]) as f64;
+        own_exchange_budget += (recent_purchases[[agent_id, other_good]]
+            + recent_inventory_inflow[[agent_id, other_good]])
+            as f64;
     }
     let budget_per_good = own_exchange_budget / (recent_purchases.ncols().max(1) as f64);
-    let local_flow_per_partner = observed_acceptance
-        .max(own_turnover)
-        / (known_count.max(1) as f64);
+    let local_flow_per_partner =
+        observed_acceptance.max(own_turnover) / (known_count.max(1) as f64);
     local_flow_per_partner
         .max(budget_per_good * acceptance_breadth)
         .max(own_need_scale * reserve_bootstrap_floor.max(0.0))
@@ -4372,7 +4820,8 @@ fn exchange_media_reserve_score(
     }
     let own_need_scale =
         ((base_need[[agent_id, good_id]] as f64) * (needs_level[agent_id] as f64)).max(0.5);
-    let local_need_window = (own_need_scale * known_count as f64 * history.max(1) as f64).max(EPSILON as f64);
+    let local_need_window =
+        (own_need_scale * known_count as f64 * history.max(1) as f64).max(EPSILON as f64);
     let need_normalized_acceptance = observed_acceptance / local_need_window;
     if need_normalized_acceptance < reserve_min_acceptance {
         return 0.0;
@@ -4494,10 +4943,12 @@ fn plan_specific_exchange_candidate(
     agent_id: usize,
     need_good: usize,
     initial_transparency_for_execution: f64,
+    standardization_scores: &[f32],
     max_need: f64,
     min_trade_quantity: f64,
     trade_rounding_buffer: f64,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -4524,12 +4975,21 @@ fn plan_specific_exchange_candidate(
     }
 
     let reciprocal_slot = find_friend_slot_scan_internal(friend_ids, fid, agent_id as i32);
-    let need_transparency = transparency[[agent_id, friend_slot, need_good]] as f64;
+    let need_transparency = effective_trade_transparency_f64(
+        transparency[[agent_id, friend_slot, need_good]] as f64,
+        standardization_scores,
+        need_good,
+    );
     let receiving_transparency = if reciprocal_slot >= 0 {
         transparency[[fid, reciprocal_slot as usize, offer_good]] as f64
     } else {
         initial_transparency_for_execution
     };
+    let receiving_transparency = effective_trade_transparency_f64(
+        receiving_transparency,
+        standardization_scores,
+        offer_good,
+    );
     let my_need_purchase_price = purchase_price[[agent_id, need_good]] as f64;
     let my_offer_sales_price = sales_price[[agent_id, offer_good]] as f64;
     let friend_need_sales_price = sales_price[[fid, need_good]] as f64;
@@ -4541,19 +5001,21 @@ fn plan_specific_exchange_candidate(
             / my_offer_sales_price.max(EPSILON as f64)))
         / 2.0;
 
-    let my_needs_level = needs_level[agent_id] as f64;
-    let friend_needs_level = needs_level[fid] as f64;
-    let mut max_exchange = (((stock[[agent_id, offer_good]] as f64)
-        - ((elastic_need[offer_good] as f64) * my_needs_level))
+    let my_offer_need =
+        effective_need_value(base_need, elastic_need, needs_level, agent_id, offer_good) as f64;
+    let friend_need_scale =
+        effective_need_value(base_need, elastic_need, needs_level, fid, need_good) as f64;
+    let friend_offer_need =
+        effective_need_value(base_need, elastic_need, needs_level, fid, offer_good) as f64;
+    let mut max_exchange = (((stock[[agent_id, offer_good]] as f64) - my_offer_need)
         * receiving_transparency)
         / switch_average.max(EPSILON as f64);
     let reason_code = if max_exchange <= min_trade_quantity {
         PLAN_OFFER_SURPLUS_BELOW_MIN
     } else {
         max_exchange = max_exchange.min(max_need);
-        let friend_supply = ((stock[[fid, need_good]] as f64)
-            - (friend_needs_level * (elastic_need[need_good] as f64)))
-            * need_transparency;
+        let friend_supply =
+            ((stock[[fid, need_good]] as f64) - friend_need_scale) * need_transparency;
         max_exchange = max_exchange.min(friend_supply);
         if max_exchange <= min_trade_quantity {
             PLAN_FRIEND_SUPPLY_BELOW_MIN
@@ -4571,8 +5033,7 @@ fn plan_specific_exchange_candidate(
                 }
             }
         } else {
-            let immediate_need = (friend_needs_level * (elastic_need[offer_good] as f64))
-                - (stock[[fid, offer_good]] as f64);
+            let immediate_need = friend_offer_need - (stock[[fid, offer_good]] as f64);
             max_exchange = max_exchange.min(immediate_need / switch_average.max(EPSILON as f64));
             if max_exchange <= min_trade_quantity {
                 PLAN_PARTNER_NEED_BELOW_MIN
@@ -4617,6 +5078,7 @@ fn plan_agent_basket_candidates_from_views(
     exchange_media_reserve_bias: f64,
     exchange_media_reserve_min_acceptance: f64,
     exchange_media_reserve_bootstrap_floor: f64,
+    standardization_scores: &[f32],
     forbidden_offer_by_need: &[bool],
     elastic_need: ArrayView1<'_, f32>,
     base_need: ArrayView2<'_, f32>,
@@ -4676,6 +5138,7 @@ fn plan_agent_basket_candidates_from_views(
         exchange_media_reserve_bias,
         exchange_media_reserve_min_acceptance,
         exchange_media_reserve_bootstrap_floor,
+        standardization_scores,
         forbidden_offer_by_need,
         elastic_need,
         base_need,
@@ -4715,6 +5178,7 @@ fn plan_one_basket_candidate_from_cached_links(
     exchange_media_reserve_bias: f64,
     exchange_media_reserve_min_acceptance: f64,
     exchange_media_reserve_bootstrap_floor: f64,
+    standardization_scores: &[f32],
     forbidden_offer_by_need: &[bool],
     available_offer_goods: &[usize],
     elastic_need: ArrayView1<'_, f32>,
@@ -4778,6 +5242,7 @@ fn plan_one_basket_candidate_from_cached_links(
         goods,
         need_good,
         initial_transparency,
+        standardization_scores,
         forbidden_offer_by_need,
         available_offer_goods,
         friend_ids_row,
@@ -4788,7 +5253,9 @@ fn plan_one_basket_candidate_from_cached_links(
         my_role,
         my_transparency,
         my_needs_level,
+        base_need.row(agent_id),
         elastic_need,
+        base_need,
         stock,
         role,
         stock_limit,
@@ -4831,6 +5298,7 @@ fn plan_need_basket_candidates_from_cached_links(
     exchange_media_reserve_bias: f64,
     exchange_media_reserve_min_acceptance: f64,
     exchange_media_reserve_bootstrap_floor: f64,
+    standardization_scores: &[f32],
     forbidden_offer_by_need: &[bool],
     available_offer_goods: &[usize],
     elastic_need: ArrayView1<'_, f32>,
@@ -4899,6 +5367,7 @@ fn plan_need_basket_candidates_from_cached_links(
             goods,
             need_good,
             initial_transparency,
+            standardization_scores,
             &local_forbidden,
             available_offer_goods,
             friend_ids_row,
@@ -4909,7 +5378,9 @@ fn plan_need_basket_candidates_from_cached_links(
             my_role,
             my_transparency,
             my_needs_level,
+            base_need.row(agent_id),
             elastic_need,
+            base_need,
             stock,
             role,
             stock_limit,
@@ -4962,6 +5433,7 @@ fn build_static_basket_candidate_lists(
     goods: usize,
     acquaintances: usize,
     initial_transparency: f32,
+    standardization_scores: &[f32],
     role: ArrayView2<'_, i32>,
     purchase_price: ArrayView2<'_, f32>,
     sales_price: ArrayView2<'_, f32>,
@@ -4996,7 +5468,16 @@ fn build_static_basket_candidate_lists(
                     } else {
                         initial_transparency
                     };
-                    let need_transparency = my_transparency[[friend_slot, need_good]];
+                    let receiving_transparency = effective_trade_transparency(
+                        receiving_transparency,
+                        standardization_scores,
+                        offer_good,
+                    );
+                    let need_transparency = effective_trade_transparency(
+                        my_transparency[[friend_slot, need_good]],
+                        standardization_scores,
+                        need_good,
+                    );
                     let friend_need_role = role[[fid, need_good]] as f32;
                     let friend_need_sales_price = sales_price[[fid, need_good]];
 
@@ -5152,6 +5633,7 @@ fn offer_good_exhausted_for_agent(
     agent_id: usize,
     offer_good: usize,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     needs_level: ArrayView1<'_, f32>,
 ) -> bool {
@@ -5159,7 +5641,8 @@ fn offer_good_exhausted_for_agent(
     {
         return true;
     }
-    stock[[agent_id, offer_good]] <= (elastic_need[offer_good] * needs_level[agent_id] + 1.0)
+    stock[[agent_id, offer_good]]
+        <= (effective_need_value(base_need, elastic_need, needs_level, agent_id, offer_good) + 1.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5169,6 +5652,7 @@ fn build_session_availability_cache(
     acquaintances: usize,
     agent_friend_ids: &[i32],
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -5185,10 +5669,9 @@ fn build_session_availability_cache(
         );
     }
 
-    let my_needs_level = needs_level[agent_id];
     for good_id in 0..goods {
-        own_offer_available[good_id] =
-            stock[[agent_id, good_id]] > ((elastic_need[good_id] * my_needs_level) + 1.0);
+        own_offer_available[good_id] = stock[[agent_id, good_id]]
+            > (effective_need_value(base_need, elastic_need, needs_level, agent_id, good_id) + 1.0);
     }
 
     for friend_slot in 0..acquaintances {
@@ -5202,15 +5685,16 @@ fn build_session_availability_cache(
         if friend_idx >= stock.nrows() {
             continue;
         }
-        let friend_needs_level = needs_level[friend_idx];
         let base_index = friend_slot * goods;
         for good_id in 0..goods {
-            friend_supply_available[base_index + good_id] =
-                stock[[friend_idx, good_id]] > ((elastic_need[good_id] * friend_needs_level) + 1.0);
+            friend_supply_available[base_index + good_id] = stock[[friend_idx, good_id]]
+                > (effective_need_value(base_need, elastic_need, needs_level, friend_idx, good_id)
+                    + 1.0);
             let gift_max_level = if role[[friend_idx, good_id]] == ROLE_RETAILER {
                 stock_limit[[friend_idx, good_id]] - 1.0
             } else {
-                (elastic_need[good_id] * friend_needs_level) - 1.0
+                effective_need_value(base_need, elastic_need, needs_level, friend_idx, good_id)
+                    - 1.0
             };
             friend_accept_available[base_index + good_id] =
                 stock[[friend_idx, good_id]] < gift_max_level;
@@ -5235,6 +5719,7 @@ fn refresh_session_availability_good(
     good_id: usize,
     goods: usize,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     role: ArrayView2<'_, i32>,
     stock_limit: ArrayView2<'_, f32>,
@@ -5243,19 +5728,20 @@ fn refresh_session_availability_good(
     if good_id >= goods || agent_id >= stock.nrows() || friend_idx >= stock.nrows() {
         return;
     }
-    own_offer_available[good_id] =
-        stock[[agent_id, good_id]] > ((elastic_need[good_id] * needs_level[agent_id]) + 1.0);
+    own_offer_available[good_id] = stock[[agent_id, good_id]]
+        > (effective_need_value(base_need, elastic_need, needs_level, agent_id, good_id) + 1.0);
 
     if friend_slot < friend_supply_available.len().saturating_div(goods.max(1)) {
-        let friend_needs_level = needs_level[friend_idx];
         let index = (friend_slot * goods) + good_id;
         if index < friend_supply_available.len() && index < friend_accept_available.len() {
-            friend_supply_available[index] =
-                stock[[friend_idx, good_id]] > ((elastic_need[good_id] * friend_needs_level) + 1.0);
+            friend_supply_available[index] = stock[[friend_idx, good_id]]
+                > (effective_need_value(base_need, elastic_need, needs_level, friend_idx, good_id)
+                    + 1.0);
             let gift_max_level = if role[[friend_idx, good_id]] == ROLE_RETAILER {
                 stock_limit[[friend_idx, good_id]] - 1.0
             } else {
-                (elastic_need[good_id] * friend_needs_level) - 1.0
+                effective_need_value(base_need, elastic_need, needs_level, friend_idx, good_id)
+                    - 1.0
             };
             friend_accept_available[index] = stock[[friend_idx, good_id]] < gift_max_level;
         }
@@ -5266,6 +5752,7 @@ fn collect_available_offer_goods(
     agent_id: usize,
     goods: usize,
     elastic_need: ArrayView1<'_, f32>,
+    base_need: ArrayView2<'_, f32>,
     stock: ArrayView2<'_, f32>,
     needs_level: ArrayView1<'_, f32>,
     disable_offer_prefilter: bool,
@@ -5278,13 +5765,18 @@ fn collect_available_offer_goods(
             .filter(|offer_good| *offer_good < stock.ncols() && *offer_good < elastic_need.len())
             .collect();
     }
-    let my_needs_level = needs_level[agent_id];
     (0..goods)
         .filter(|offer_good| {
             *offer_good < stock.ncols()
                 && *offer_good < elastic_need.len()
                 && stock[[agent_id, *offer_good]]
-                    > ((elastic_need[*offer_good] * my_needs_level) + 1.0)
+                    > (effective_need_value(
+                        base_need,
+                        elastic_need,
+                        needs_level,
+                        agent_id,
+                        *offer_good,
+                    ) + 1.0)
         })
         .collect()
 }
@@ -5345,6 +5837,7 @@ fn plan_agent_basket_candidates_from_cached_links(
     exchange_media_reserve_bias: f64,
     exchange_media_reserve_min_acceptance: f64,
     exchange_media_reserve_bootstrap_floor: f64,
+    standardization_scores: &[f32],
     forbidden_offer_by_need: &[bool],
     elastic_need: ArrayView1<'_, f32>,
     base_need: ArrayView2<'_, f32>,
@@ -5389,6 +5882,7 @@ fn plan_agent_basket_candidates_from_cached_links(
         agent_id,
         goods,
         elastic_need,
+        base_need,
         stock,
         needs_level,
         disable_offer_prefilter,
@@ -5418,6 +5912,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                         exchange_media_reserve_bias,
                         exchange_media_reserve_min_acceptance,
                         exchange_media_reserve_bootstrap_floor,
+                        standardization_scores,
                         forbidden_offer_by_need,
                         &available_offer_goods,
                         elastic_need,
@@ -5466,6 +5961,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                         exchange_media_reserve_bias,
                         exchange_media_reserve_min_acceptance,
                         exchange_media_reserve_bootstrap_floor,
+                        standardization_scores,
                         forbidden_offer_by_need,
                         &available_offer_goods,
                         elastic_need,
@@ -5516,6 +6012,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                     exchange_media_reserve_bias,
                     exchange_media_reserve_min_acceptance,
                     exchange_media_reserve_bootstrap_floor,
+                    standardization_scores,
                     forbidden_offer_by_need,
                     &available_offer_goods,
                     elastic_need,
@@ -5563,6 +6060,7 @@ fn plan_agent_basket_candidates_from_cached_links(
                     exchange_media_reserve_bias,
                     exchange_media_reserve_min_acceptance,
                     exchange_media_reserve_bootstrap_floor,
+                    standardization_scores,
                     forbidden_offer_by_need,
                     &available_offer_goods,
                     elastic_need,
@@ -5867,6 +6365,7 @@ fn run_exchange_stage(
                     need_good,
                     aspirational_stock_target,
                     elastic_need,
+                    base_need,
                     stock_limit,
                     needs_level,
                 );
@@ -5896,14 +6395,15 @@ fn run_exchange_stage(
             } else {
                 stock_limit[[agent_id, need_good]] as f64
             };
+            let current_need =
+                effective_need_value(base_need, elastic_need, needs_level, agent_id, need_good);
             if deal_type == CONSUMPTION_DEAL {
-                if stock[[agent_id, need_good]] >= (elastic_need[need_good] * needs_level[agent_id])
-                {
+                if stock[[agent_id, need_good]] >= current_need {
                     continue;
                 }
             } else {
                 let legacy_surplus_signal = recent_sales[[agent_id, need_good]]
-                    > (recent_production[[agent_id, need_good]] - elastic_need[need_good]);
+                    > (recent_production[[agent_id, need_good]] - current_need);
                 let local_liquidity_signal = target_stock_limit
                     > (stock_limit[[agent_id, need_good]] as f64) + (EPSILON as f64);
                 let aspirational_target = aspirational_stock_target_for_good(
@@ -5911,6 +6411,7 @@ fn run_exchange_stage(
                     need_good,
                     aspirational_stock_target,
                     elastic_need,
+                    base_need,
                     stock_limit,
                     needs_level,
                 );
@@ -5919,7 +6420,7 @@ fn run_exchange_stage(
                         < aspirational_target - (EPSILON as f64);
                 if !(legacy_surplus_signal || local_liquidity_signal || aspirational_stock_signal)
                     || (stock[[agent_id, need_good]] as f64)
-                        >= target_stock_limit - (elastic_need[need_good] as f64)
+                        >= target_stock_limit - (current_need as f64)
                 {
                     continue;
                 }
@@ -5929,7 +6430,13 @@ fn run_exchange_stage(
             base_offer_goods.clear();
             for offer_good in 0..goods {
                 if stock[[agent_id, offer_good]]
-                    <= ((elastic_need[offer_good] * needs_level[agent_id]) + 1.0)
+                    <= (effective_need_value(
+                        base_need,
+                        elastic_need,
+                        needs_level,
+                        agent_id,
+                        offer_good,
+                    ) + 1.0)
                 {
                     continue;
                 }
@@ -5972,6 +6479,7 @@ fn run_exchange_stage(
                     min_trade_quantity,
                     trade_rounding_buffer,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     role,
                     stock_limit,
@@ -7464,6 +7972,7 @@ fn run_basket_session_internal(
     exchange_media_reserve_bias: f64,
     exchange_media_reserve_min_acceptance: f64,
     exchange_media_reserve_bootstrap_floor: f64,
+    standardization_scores: &[f32],
     replan_after_each_trade: bool,
     disable_replan_cache: bool,
     disable_offer_prefilter: bool,
@@ -7567,6 +8076,7 @@ fn run_basket_session_internal(
                     goods,
                     acquaintances,
                     initial_transparency,
+                    standardization_scores,
                     role,
                     purchase_price,
                     sales_price,
@@ -7599,6 +8109,7 @@ fn run_basket_session_internal(
                             acquaintances,
                             &agent_friend_ids,
                             elastic_need,
+                            base_need,
                             stock.view(),
                             role,
                             stock_limit,
@@ -7701,6 +8212,7 @@ fn run_basket_session_internal(
                     exchange_media_reserve_bias,
                     exchange_media_reserve_min_acceptance,
                     exchange_media_reserve_bootstrap_floor,
+                    standardization_scores,
                     &forbidden_offer_by_need,
                     elastic_need,
                     base_need,
@@ -7743,6 +8255,7 @@ fn run_basket_session_internal(
                     goods,
                     acquaintances,
                     initial_transparency,
+                    standardization_scores,
                     role,
                     purchase_price,
                     sales_price,
@@ -7775,6 +8288,7 @@ fn run_basket_session_internal(
                             acquaintances,
                             &agent_friend_ids,
                             elastic_need,
+                            base_need,
                             stock.view(),
                             role,
                             stock_limit,
@@ -7885,6 +8399,7 @@ fn run_basket_session_internal(
                 exchange_media_reserve_bias,
                 exchange_media_reserve_min_acceptance,
                 exchange_media_reserve_bootstrap_floor,
+                standardization_scores,
                 &forbidden_offer_by_need,
                 elastic_need,
                 base_need,
@@ -7988,10 +8503,12 @@ fn run_basket_session_internal(
                 agent_id,
                 need_good,
                 initial_transparency_for_execution,
+                standardization_scores,
                 max_need,
                 min_trade_quantity,
                 trade_rounding_buffer,
                 elastic_need,
+                base_need,
                 stock.view(),
                 role,
                 stock_limit,
@@ -8224,6 +8741,7 @@ fn run_basket_session_internal(
                     offer_good,
                     goods,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     role,
                     stock_limit,
@@ -8239,6 +8757,7 @@ fn run_basket_session_internal(
                     need_good,
                     goods,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     role,
                     stock_limit,
@@ -8252,6 +8771,7 @@ fn run_basket_session_internal(
                 agent_id,
                 offer_good,
                 elastic_need,
+                base_need,
                 stock.view(),
                 needs_level,
             );
@@ -8283,8 +8803,13 @@ fn run_basket_session_internal(
             if use_replan_cache {
                 let mut dirty_all = false;
                 if deal_type == SURPLUS_DEAL {
-                    let own_offer_threshold =
-                        (elastic_need[need_good] * needs_level[agent_id]) + 1.0;
+                    let own_offer_threshold = effective_need_value(
+                        base_need,
+                        elastic_need,
+                        needs_level,
+                        agent_id,
+                        need_good,
+                    ) + 1.0;
                     if my_need_stock_before <= own_offer_threshold
                         && stock[[agent_id, need_good]] > own_offer_threshold
                     {
@@ -8303,7 +8828,13 @@ fn run_basket_session_internal(
                 let friend_accept_threshold = if role[[friend_idx, need_good]] == ROLE_RETAILER {
                     stock_limit[[friend_idx, need_good]] - 1.0
                 } else {
-                    elastic_need[need_good] * needs_level[friend_idx] - 1.0
+                    effective_need_value(
+                        base_need,
+                        elastic_need,
+                        needs_level,
+                        friend_idx,
+                        need_good,
+                    ) - 1.0
                 };
                 if friend_need_stock_before >= friend_accept_threshold
                     && stock[[friend_idx, need_good]] < friend_accept_threshold
@@ -8339,8 +8870,13 @@ fn run_basket_session_internal(
                         }
                     }
                 }
-                let friend_offer_supply_threshold =
-                    (elastic_need[offer_good] * needs_level[friend_idx]) + 1.0;
+                let friend_offer_supply_threshold = effective_need_value(
+                    base_need,
+                    elastic_need,
+                    needs_level,
+                    friend_idx,
+                    offer_good,
+                ) + 1.0;
                 if friend_offer_supply_threshold.is_finite()
                     && friend_offer_stock_before <= friend_offer_supply_threshold
                     && stock[[friend_idx, offer_good]] > friend_offer_supply_threshold
@@ -8432,6 +8968,7 @@ fn run_phenomenon_session_stage(
     let session_candidate_depth: usize = config
         .getattr("experimental_session_candidate_depth")?
         .extract()?;
+    let standardization_scores = extract_standardization_scores(&config, goods)?;
     let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
     let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
     let initial_transactions = 2.0_f32;
@@ -8563,6 +9100,7 @@ fn run_phenomenon_session_stage(
                 exchange_media_reserve_bias,
                 exchange_media_reserve_min_acceptance,
                 exchange_media_reserve_bootstrap_floor,
+                &standardization_scores,
                 session_replan_after_trade,
                 session_disable_replan_cache,
                 session_disable_offer_prefilter,
@@ -8683,6 +9221,7 @@ fn run_agent_basket_exchange_stage(
     let session_pairwise_offer_exhaustion: bool = config
         .getattr("experimental_session_pairwise_offer_exhaustion")?
         .extract()?;
+    let standardization_scores = extract_standardization_scores(&config, goods)?;
     let min_trade_quantity: f64 = config.getattr("min_trade_quantity")?.extract()?;
     let trade_rounding_buffer: f64 = config.getattr("trade_rounding_buffer")?.extract()?;
     let max_attempts = goods * acquaintances;
@@ -8833,6 +9372,7 @@ fn run_agent_basket_exchange_stage(
                 exchange_media_reserve_bias,
                 exchange_media_reserve_min_acceptance,
                 exchange_media_reserve_bootstrap_floor,
+                &standardization_scores,
                 &forbidden_offer_by_need,
                 elastic_need,
                 base_need,
@@ -8916,10 +9456,12 @@ fn run_agent_basket_exchange_stage(
                     agent_id,
                     need_good,
                     initial_transparency_for_execution,
+                    &standardization_scores,
                     max_need,
                     min_trade_quantity,
                     trade_rounding_buffer,
                     elastic_need,
+                    base_need,
                     stock.view(),
                     role,
                     stock_limit,
@@ -9130,6 +9672,7 @@ fn run_agent_basket_exchange_stage(
                         agent_id,
                         offer_good,
                         elastic_need,
+                        base_need,
                         stock.view(),
                         needs_level,
                     )
@@ -9203,6 +9746,14 @@ fn run_full_native_agent_basket_cycle(
     let initial_transparency = initial_transparency_for_execution as f32;
     let activity_discount: f64 = config.getattr("activity_discount")?.extract()?;
     let spoilage_rate: f64 = config.getattr("spoilage_rate")?.extract()?;
+    let storage_spoilage_rates = extract_config_f32_vector(
+        config,
+        "storage_spoilage_rates",
+        goods,
+        spoilage_rate as f32,
+    )?;
+    let storage_target_multipliers =
+        extract_config_f32_vector(config, "storage_target_multipliers", goods, 1.0)?;
     let stock_spoil_threshold: f64 = config.getattr("stock_spoil_threshold")?.extract()?;
     let price_reduction: f64 = config.getattr("price_reduction")?.extract()?;
     let price_hike_f32: f32 = config.getattr("price_hike")?.extract()?;
@@ -9249,6 +9800,17 @@ fn run_full_native_agent_basket_cycle(
         .extract()?;
     let session_pairwise_offer_exhaustion: bool = config
         .getattr("experimental_session_pairwise_offer_exhaustion")?
+        .extract()?;
+    let standardization_scores = extract_standardization_scores(config, goods)?;
+    let transparency_learning_mode: String = config
+        .getattr("experimental_transparency_learning_mode")?
+        .extract()?;
+    let transparency_recent_count = transparency_learning_mode == "recent-count";
+    let endogenous_standardization_strength: f64 = config
+        .getattr("experimental_endogenous_standardization_strength")?
+        .extract()?;
+    let endogenous_standardization_need_power: f64 = config
+        .getattr("experimental_endogenous_standardization_need_power")?
         .extract()?;
     let use_value_price_floor_fraction: f64 = config
         .getattr("use_value_price_floor_fraction")?
@@ -9329,6 +9891,12 @@ fn run_full_native_agent_basket_cycle(
     let mut friend_purchased: PyReadwriteArray3<'_, f32> =
         state.getattr("friend_purchased")?.extract()?;
     let mut friend_sold: PyReadwriteArray3<'_, f32> = state.getattr("friend_sold")?.extract()?;
+    let mut reputation_product_experience: PyReadwriteArray2<'_, f32> =
+        state.getattr("reputation_product_experience")?.extract()?;
+    let mut reputation_seller_activity: PyReadwriteArray2<'_, f32> =
+        state.getattr("reputation_seller_activity")?.extract()?;
+    let mut reputation_seller_breadth: PyReadwriteArray2<'_, f32> =
+        state.getattr("reputation_seller_breadth")?.extract()?;
     let trade = state.getattr("trade")?;
     let mut proposal_friend_slot: PyReadwriteArray1<'_, i32> =
         trade.getattr("proposal_friend_slot")?.extract()?;
@@ -9391,6 +9959,9 @@ fn run_full_native_agent_basket_cycle(
     let mut friend_activity = friend_activity.as_array_mut();
     let mut friend_purchased = friend_purchased.as_array_mut();
     let mut friend_sold = friend_sold.as_array_mut();
+    let mut reputation_product_experience = reputation_product_experience.as_array_mut();
+    let mut reputation_seller_activity = reputation_seller_activity.as_array_mut();
+    let mut reputation_seller_breadth = reputation_seller_breadth.as_array_mut();
     let mut proposal_friend_slot = proposal_friend_slot.as_array_mut();
     let mut proposal_target_agent = proposal_target_agent.as_array_mut();
     let mut proposal_need_good = proposal_need_good.as_array_mut();
@@ -9452,6 +10023,7 @@ fn run_full_native_agent_basket_cycle(
             exchange_media_reserve_bias,
             exchange_media_reserve_min_acceptance,
             exchange_media_reserve_bootstrap_floor,
+            &standardization_scores,
             session_replan_after_trade,
             session_disable_replan_cache,
             session_disable_offer_prefilter,
@@ -9578,6 +10150,7 @@ fn run_full_native_agent_basket_cycle(
             exchange_media_reserve_bias,
             exchange_media_reserve_min_acceptance,
             exchange_media_reserve_bootstrap_floor,
+            &standardization_scores,
             session_replan_after_trade,
             session_disable_replan_cache,
             session_disable_offer_prefilter,
@@ -9661,6 +10234,8 @@ fn run_full_native_agent_basket_cycle(
             stock_limit_multiplier as f64,
             activity_discount,
             spoilage_rate,
+            &storage_spoilage_rates,
+            &storage_target_multipliers,
             stock_spoil_threshold,
             price_reduction,
             price_hike,
@@ -9700,13 +10275,21 @@ fn run_full_native_agent_basket_cycle(
             purchase_price.view_mut(),
             sales_price.view_mut(),
             friend_activity.view_mut(),
-            friend_purchased.view(),
+            friend_purchased.view_mut(),
+            friend_sold.view_mut(),
+            friend_id.view(),
+            reputation_product_experience.view_mut(),
+            reputation_seller_activity.view_mut(),
+            reputation_seller_breadth.view_mut(),
             transparency.view_mut(),
             needs_level.view(),
             elastic_need,
             market_periodic_spoilage.view_mut(),
             use_value_price_floor_fraction,
             legacy_price_floor,
+            transparency_recent_count,
+            endogenous_standardization_strength,
+            endogenous_standardization_need_power,
         );
     }
 

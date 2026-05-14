@@ -149,6 +149,30 @@ def test_exchange_media_reserve_normalizes_acceptance_by_local_need() -> None:
     assert runner._exchange_media_reserve_target_stock_limit(0, 1) == pytest.approx(float(state.stock_limit[0, 1]))
 
 
+def test_basic_cycle_need_keeps_original_basket_as_floor() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.base_need[0] = np.array([1.0, 1.0], dtype=np.float32)
+    state.market.elastic_need[...] = np.array([2.0, 0.0], dtype=np.float32)
+    state.needs_level[0] = 1.0
+
+    assert np.allclose(runner._baseline_cycle_need(0), np.array([1.0, 1.0], dtype=np.float32))
+
+    state.needs_level[0] = 2.0
+
+    assert np.allclose(runner._baseline_cycle_need(0), np.array([3.0, 1.0], dtype=np.float32))
+
+
 def test_end_agent_period_spoils_stock_above_threshold() -> None:
     config = SimulationConfig(
         population=1,
@@ -386,6 +410,120 @@ def test_use_value_price_floor_anchors_to_focused_cost_when_inventory_is_useful(
     expected_floor = 0.5
     assert float(state.purchase_price[0, 0]) == pytest.approx(expected_floor)
     assert float(state.sales_price[0, 0]) == pytest.approx(expected_floor / config.price_reduction)
+
+
+def test_friend_transparency_scales_trade_experience_by_original_need_not_elastic_need() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=2,
+        supply_candidates=2,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.base_need[0] = np.array([1.0, 100.0], dtype=np.float32)
+    state.market.elastic_need[...] = np.array([0.1, 1000.0], dtype=np.float32)
+    state.talent_mask[...] = 0.0
+    state.friend_activity[0, 0] = 0.0
+    state.friend_purchased[0, 0] = np.array([4.0, 4.0], dtype=np.float32)
+    state.recent_purchases[0] = np.array([4.0, 4.0], dtype=np.float32)
+
+    runner._calibrate_friend_transparency(0)
+
+    rare_like_transparency = float(state.transparency[0, 0, 0])
+    high_need_transparency = float(state.transparency[0, 0, 1])
+    assert rare_like_transparency > high_need_transparency + 0.15
+
+
+def test_recent_count_transparency_uses_trade_counts_not_trade_volume() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=2,
+        supply_candidates=2,
+        activity_discount=0.8,
+        experimental_transparency_learning_mode="recent-count",
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.base_need[0] = np.array([1.0, 100.0], dtype=np.float32)
+    state.talent_mask[...] = 0.0
+    state.friend_activity[0, 0] = 4.0
+    state.friend_purchased[0, 0] = np.array([2.0, 2.0], dtype=np.float32)
+    state.friend_sold[0, 0] = np.array([1.0, 1.0], dtype=np.float32)
+    state.recent_purchases[0] = np.array([1.0, 1_000_000.0], dtype=np.float32)
+
+    runner._calibrate_friend_transparency(0)
+
+    assert float(state.transparency[0, 0, 0]) == pytest.approx(float(state.transparency[0, 0, 1]))
+    assert float(state.friend_activity[0, 0]) == pytest.approx(3.2)
+    assert state.friend_purchased[0, 0].tolist() == pytest.approx([1.6, 1.6])
+    assert state.friend_sold[0, 0].tolist() == pytest.approx([0.8, 0.8])
+
+
+def test_endogenous_standardization_uses_direct_friend_reputation_and_need_scale() -> None:
+    config = SimulationConfig(
+        population=2,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=2,
+        supply_candidates=2,
+        experimental_transparency_learning_mode="recent-count",
+        experimental_endogenous_standardization_strength=0.5,
+        experimental_endogenous_standardization_need_power=1.0,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.base_need[:] = np.array([[1.0, 100.0], [1.0, 100.0]], dtype=np.float32)
+    state.friend_id[0, 0] = 1
+    state.friend_activity[0, 0] = 0.0
+    state.friend_purchased[0, 0, :] = 0.0
+    state.friend_sold[0, 0, :] = 0.0
+    state.reputation_product_experience[1, :] = np.array([4.0, 4.0], dtype=np.float32)
+    state.reputation_seller_activity[1, :] = np.array([4.0, 4.0], dtype=np.float32)
+    state.reputation_seller_breadth[1, :] = np.array([1.0, 1.0], dtype=np.float32)
+
+    runner._calibrate_friend_transparency(0)
+
+    assert float(state.transparency[0, 0, 0]) > float(state.transparency[0, 0, 1])
+    assert float(state.transparency[0, 0, 0]) > config.initial_transparency
+
+
+def test_reputation_signals_are_refreshed_from_local_friend_observations() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=2,
+        active_acquaintances=1,
+        demand_candidates=2,
+        supply_candidates=2,
+        experimental_endogenous_standardization_strength=0.5,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    runner = LegacyCycleRunner(engine)
+    state = engine.state
+
+    state.friend_id[0] = np.array([0, 0], dtype=np.int32)
+    state.friend_purchased[0, :, 0] = np.array([1.0, 3.0], dtype=np.float32)
+    state.friend_sold[0, :, 0] = np.array([2.0, 0.0], dtype=np.float32)
+    state.friend_sold[0, :, 1] = np.array([0.0, 4.0], dtype=np.float32)
+
+    runner._refresh_reputation_signals(0)
+
+    assert state.reputation_product_experience[0].tolist() == pytest.approx([6.0, 4.0])
+    assert state.reputation_seller_activity[0].tolist() == pytest.approx([2.0, 4.0])
+    assert state.reputation_seller_breadth[0].tolist() == pytest.approx([0.5, 0.5])
 
 
 def test_use_value_price_floor_falls_with_visible_inventory_overhang() -> None:

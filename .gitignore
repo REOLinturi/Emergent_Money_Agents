@@ -26,3 +26,4 @@ overnight_*.py
 run_*.cmd
 
 native/legacy_search/target/
+src/_legacy_native_search/

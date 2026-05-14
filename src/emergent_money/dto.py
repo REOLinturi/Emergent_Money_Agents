@@ -85,6 +85,15 @@ class MarketSnapshot:
     tce_share_of_time_budget: float = 0.0
     spoilage_share_of_time_budget: float = 0.0
     friction_share_of_time_budget: float = 0.0
+    fixed_basket_living_standard_mean: float = 0.0
+    fixed_basket_living_standard_median: float = 0.0
+    fixed_basket_living_standard_p10: float = 0.0
+    fixed_basket_living_standard_p90: float = 0.0
+    substitution_lift_mean: float = 0.0
+    fixed_basket_capacity_upper_bound: float = 0.0
+    fixed_basket_capacity_greedy_bound: float = 0.0
+    elastic_basket_capacity_upper_bound: float = 0.0
+    elastic_basket_capacity_greedy_bound: float = 0.0
 
     @classmethod
     def from_metrics(cls, metrics: MetricsSnapshot) -> "MarketSnapshot":
@@ -158,6 +167,15 @@ class MarketSnapshot:
             tce_share_of_time_budget=metrics.tce_share_of_time_budget,
             spoilage_share_of_time_budget=metrics.spoilage_share_of_time_budget,
             friction_share_of_time_budget=metrics.friction_share_of_time_budget,
+            fixed_basket_living_standard_mean=metrics.fixed_basket_living_standard_mean,
+            fixed_basket_living_standard_median=metrics.fixed_basket_living_standard_median,
+            fixed_basket_living_standard_p10=metrics.fixed_basket_living_standard_p10,
+            fixed_basket_living_standard_p90=metrics.fixed_basket_living_standard_p90,
+            substitution_lift_mean=metrics.substitution_lift_mean,
+            fixed_basket_capacity_upper_bound=metrics.fixed_basket_capacity_upper_bound,
+            fixed_basket_capacity_greedy_bound=metrics.fixed_basket_capacity_greedy_bound,
+            elastic_basket_capacity_upper_bound=metrics.elastic_basket_capacity_upper_bound,
+            elastic_basket_capacity_greedy_bound=metrics.elastic_basket_capacity_greedy_bound,
         )
 
 
@@ -239,6 +257,18 @@ class GoodSnapshot:
     exchange_media_reserve_scale: float = 0.0
     exchange_media_reserve_gap: float = 0.0
     exchange_media_spread_ok_share: float = 0.0
+    local_product_experience_score: float = 0.0
+    seller_breadth_reputation_score: float = 0.0
+    top_seller_breadth_share: float = 0.0
+    endogenous_standardization_score: float = 0.0
+    seller_specialization_score: float = 0.0
+    top_seller_specialization_share: float = 0.0
+    merchant_round_trip_breadth: float = 0.0
+    non_consumption_flow_share: float = 0.0
+    intermediation_purity_score: float = 0.0
+    storage_class: int = 1
+    storage_spoilage_rate: float = 0.0
+    storage_target_multiplier: float = 1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -346,6 +376,15 @@ class InequalitySnapshot:
     tce_share_of_time_budget: float
     spoilage_share_of_time_budget: float
     friction_share_of_time_budget: float
+    fixed_basket_living_standard_mean: float = 0.0
+    fixed_basket_living_standard_median: float = 0.0
+    fixed_basket_living_standard_p10: float = 0.0
+    fixed_basket_living_standard_p90: float = 0.0
+    substitution_lift_mean: float = 0.0
+    fixed_basket_capacity_upper_bound: float = 0.0
+    fixed_basket_capacity_greedy_bound: float = 0.0
+    elastic_basket_capacity_upper_bound: float = 0.0
+    elastic_basket_capacity_greedy_bound: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)

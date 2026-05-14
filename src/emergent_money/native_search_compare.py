@@ -265,6 +265,8 @@ def _copy_request(request: ExchangeSearchRequest) -> ExchangeSearchRequest:
         sales_price=_copy_array(request.sales_price),
         needs_level=_copy_array(request.needs_level),
         transparency=_copy_array(request.transparency),
+        my_base_need=None if request.my_base_need is None else _copy_array(request.my_base_need),
+        base_need=None if request.base_need is None else _copy_array(request.base_need),
     )
 
 

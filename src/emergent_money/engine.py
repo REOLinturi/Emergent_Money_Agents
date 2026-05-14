@@ -644,7 +644,8 @@ class SimulationEngine:
     def _apply_spoilage(self) -> None:
         xp = self.backend.xp
         overflow = xp.maximum(self.state.stock - self.state.stock_limit, 0.0)
-        spoiled = overflow * self.config.spoilage_rate
+        rates = xp.asarray(self.config.storage_spoilage_rates(), dtype=xp.float32)
+        spoiled = overflow * rates
         self.state.stock -= spoiled
 
     def _update_private_values(self) -> None:

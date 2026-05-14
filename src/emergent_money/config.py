@@ -5,6 +5,21 @@ from dataclasses import dataclass
 import numpy as np
 
 
+STANDARDIZATION_MODES = frozenset(
+    {
+        "none",
+        "rare",
+        "common",
+        "rare-gradient",
+        "common-gradient",
+        "random",
+    }
+)
+
+STORAGE_CLASS_MODES = frozenset({"none", "mod3", "rare-good"})
+TRANSPARENCY_LEARNING_MODES = frozenset({"legacy-volume", "recent-count"})
+
+
 @dataclass(slots=True)
 class SimulationConfig:
     population: int = 10_000
@@ -26,6 +41,13 @@ class SimulationConfig:
     stock_limit_multiplier: float = 2.0
     activity_discount: float = 0.80
     spoilage_rate: float = 0.10
+    experimental_storage_class_mode: str = "none"
+    experimental_poor_storage_spoilage_multiplier: float = 2.0
+    experimental_medium_storage_spoilage_multiplier: float = 1.0
+    experimental_good_storage_spoilage_multiplier: float = 0.25
+    experimental_poor_storage_target_multiplier: float = 0.5
+    experimental_medium_storage_target_multiplier: float = 1.0
+    experimental_good_storage_target_multiplier: float = 2.0
     max_leisure_extra_multiplier: float = 1.0
     leisure_stock_trade_bias: float = 0.35
     history: int = 4
@@ -57,6 +79,12 @@ class SimulationConfig:
     experimental_exchange_media_reserve_bias: float = 0.0
     experimental_exchange_media_reserve_min_acceptance: float = 0.01
     experimental_exchange_media_reserve_bootstrap_floor: float = 1.0
+    experimental_standardization_mode: str = "none"
+    experimental_standardization_strength: float = 0.0
+    experimental_standardization_random_seed: int = 0
+    experimental_transparency_learning_mode: str = "legacy-volume"
+    experimental_endogenous_standardization_strength: float = 0.0
+    experimental_endogenous_standardization_need_power: float = 0.5
     experimental_session_replan_passes: int = 1
     experimental_session_replan_after_trade: bool = False
     experimental_session_disable_replan_cache: bool = False
@@ -119,6 +147,18 @@ class SimulationConfig:
             raise ValueError("stock_limit_multiplier must be positive")
         if not 0.0 <= self.spoilage_rate <= 1.0:
             raise ValueError("spoilage_rate must be between 0 and 1")
+        if self.experimental_storage_class_mode not in STORAGE_CLASS_MODES:
+            raise ValueError(f"experimental_storage_class_mode must be one of {sorted(STORAGE_CLASS_MODES)}")
+        for name in (
+            "experimental_poor_storage_spoilage_multiplier",
+            "experimental_medium_storage_spoilage_multiplier",
+            "experimental_good_storage_spoilage_multiplier",
+            "experimental_poor_storage_target_multiplier",
+            "experimental_medium_storage_target_multiplier",
+            "experimental_good_storage_target_multiplier",
+        ):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
         if self.max_leisure_extra_multiplier < 0.0:
             raise ValueError("max_leisure_extra_multiplier must be non-negative")
         if self.leisure_stock_trade_bias < 0.0:
@@ -179,6 +219,21 @@ class SimulationConfig:
             raise ValueError("experimental_exchange_media_reserve_min_acceptance must be non-negative")
         if self.experimental_exchange_media_reserve_bootstrap_floor < 0.0:
             raise ValueError("experimental_exchange_media_reserve_bootstrap_floor must be non-negative")
+        if self.experimental_standardization_mode not in STANDARDIZATION_MODES:
+            raise ValueError(
+                f"experimental_standardization_mode must be one of {sorted(STANDARDIZATION_MODES)}"
+            )
+        if not 0.0 <= self.experimental_standardization_strength <= 1.0:
+            raise ValueError("experimental_standardization_strength must be between 0 and 1")
+        if self.experimental_transparency_learning_mode not in TRANSPARENCY_LEARNING_MODES:
+            raise ValueError(
+                "experimental_transparency_learning_mode must be one of "
+                f"{sorted(TRANSPARENCY_LEARNING_MODES)}"
+            )
+        if not 0.0 <= self.experimental_endogenous_standardization_strength <= 1.0:
+            raise ValueError("experimental_endogenous_standardization_strength must be between 0 and 1")
+        if self.experimental_endogenous_standardization_need_power < 0.0:
+            raise ValueError("experimental_endogenous_standardization_need_power must be non-negative")
         if self.experimental_session_replan_passes <= 0:
             raise ValueError("experimental_session_replan_passes must be positive")
         if self.experimental_session_candidate_depth <= 0:
@@ -238,3 +293,93 @@ class SimulationConfig:
     def base_need_vector(self) -> np.ndarray:
         source_good_ids = self.base_good_id_offset + (np.arange(self.goods, dtype=np.float32) * self.base_good_id_stride)
         return (source_good_ids + 1.0) ** 2
+
+    def storage_class_codes(self) -> np.ndarray:
+        """Return per-run product storage class codes.
+
+        Codes are 0=poor, 1=medium, 2=good. The `mod3` mode deliberately uses
+        the internal good index in the current run, not the external report
+        good id. A thinned run such as g0,g3,g6 therefore still receives all
+        three storage classes. The `rare-good` mode assigns the lowest-demand
+        quartile to the good-storage class and leaves other goods medium.
+        """
+        mode = self.experimental_storage_class_mode
+        if mode == "mod3":
+            return (np.arange(self.goods, dtype=np.int32) % 3).astype(np.int32, copy=False)
+        if mode == "rare-good":
+            codes = np.ones((self.goods,), dtype=np.int32)
+            demand_order = np.argsort(self.base_need_vector(), kind="stable")
+            rare_count = max(1, int(np.ceil(self.goods / 4.0)))
+            codes[demand_order[:rare_count]] = 2
+            return codes
+        return np.ones((self.goods,), dtype=np.int32)
+
+    def storage_spoilage_rates(self) -> np.ndarray:
+        rates = np.full((self.goods,), float(self.spoilage_rate), dtype=np.float32)
+        if self.experimental_storage_class_mode == "none":
+            return rates
+        multipliers = np.asarray(
+            [
+                self.experimental_poor_storage_spoilage_multiplier,
+                self.experimental_medium_storage_spoilage_multiplier,
+                self.experimental_good_storage_spoilage_multiplier,
+            ],
+            dtype=np.float32,
+        )
+        return np.clip(rates * multipliers[self.storage_class_codes()], 0.0, 1.0).astype(np.float32, copy=False)
+
+    def storage_target_multipliers(self) -> np.ndarray:
+        multipliers = np.ones((self.goods,), dtype=np.float32)
+        if self.experimental_storage_class_mode == "none":
+            return multipliers
+        class_multipliers = np.asarray(
+            [
+                self.experimental_poor_storage_target_multiplier,
+                self.experimental_medium_storage_target_multiplier,
+                self.experimental_good_storage_target_multiplier,
+            ],
+            dtype=np.float32,
+        )
+        return class_multipliers[self.storage_class_codes()].astype(np.float32, copy=False)
+
+    def exchange_standardization_scores(self) -> np.ndarray:
+        """Return product-level verification friction relief for phenomenon-path experiments.
+
+        The scores are model-level product properties, not agent observations:
+        they represent externally standardized or easily verified units such as
+        coined metal, measured grain sacks, or another quality-certified good.
+        A score of 0 leaves dyadic transparency unchanged; 1 removes the
+        remaining verification friction for that good.
+        """
+        mode = self.experimental_standardization_mode
+        strength = float(self.experimental_standardization_strength)
+        scores = np.zeros((self.goods,), dtype=np.float32)
+        if mode == "none" or strength <= 0.0:
+            return scores
+
+        base_need = self.base_need_vector()
+        demand_order = np.argsort(base_need, kind="stable")
+        quartile = max(1, int(np.ceil(self.goods / 4.0)))
+
+        if mode == "rare":
+            scores[demand_order[:quartile]] = strength
+        elif mode == "common":
+            scores[demand_order[-quartile:]] = strength
+        elif mode == "rare-gradient":
+            if self.goods == 1:
+                scores[demand_order[0]] = strength
+            else:
+                gradient = np.linspace(strength, 0.0, self.goods, dtype=np.float32)
+                scores[demand_order] = gradient
+        elif mode == "common-gradient":
+            if self.goods == 1:
+                scores[demand_order[0]] = strength
+            else:
+                gradient = np.linspace(0.0, strength, self.goods, dtype=np.float32)
+                scores[demand_order] = gradient
+        elif mode == "random":
+            rng = np.random.default_rng(self.seed + self.experimental_standardization_random_seed)
+            selected = rng.choice(self.goods, size=quartile, replace=False)
+            scores[selected] = strength
+
+        return np.clip(scores, 0.0, 1.0).astype(np.float32, copy=False)

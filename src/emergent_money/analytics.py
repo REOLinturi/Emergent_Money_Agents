@@ -15,19 +15,36 @@ from .state import ROLE_CONSUMER, ROLE_PRODUCER, ROLE_RETAILER, SimulationState
 _EPSILON = 1e-6
 
 
+def _effective_need_matrix(
+    *,
+    base_need: np.ndarray,
+    elastic_need: np.ndarray,
+    needs_level: np.ndarray,
+) -> np.ndarray:
+    extra_level = np.maximum(needs_level.astype(np.float64, copy=False) - 1.0, 0.0)
+    return base_need.astype(np.float64, copy=False) + (extra_level[:, None] * elastic_need[None, :])
+
+
 def _good_metric_arrays(
     state: SimulationState,
     backend: BaseBackend,
     config: SimulationConfig | None = None,
 ) -> dict[str, np.ndarray]:
     xp = backend.xp
-    base_need = backend.to_numpy(state.base_need[0]).astype(np.float64, copy=False)
+    base_need_all = backend.to_numpy(state.base_need).astype(np.float64, copy=False)
+    base_need = base_need_all[0]
     report_good_id = _report_good_ids_from_base_need(base_need)
+    if config is None:
+        storage_class = np.ones((base_need.shape[0],), dtype=np.int32)
+        storage_spoilage_rate = np.zeros((base_need.shape[0],), dtype=np.float64)
+        storage_target_multiplier = np.ones((base_need.shape[0],), dtype=np.float64)
+    else:
+        storage_class = config.storage_class_codes().astype(np.int32, copy=False)
+        storage_spoilage_rate = config.storage_spoilage_rates().astype(np.float64, copy=False)
+        storage_target_multiplier = config.storage_target_multipliers().astype(np.float64, copy=False)
     stock_total = backend.to_numpy(xp.sum(state.stock, axis=0)).astype(np.float64, copy=False)
     average_efficiency = backend.to_numpy(xp.mean(state.efficiency, axis=0)).astype(np.float64, copy=False)
     elastic_need = backend.to_numpy(state.market.elastic_need).astype(np.float64, copy=False)
-    population = int(state.base_need.shape[0])
-    consumption_need_total = np.maximum(elastic_need * float(population), _EPSILON)
     periodic_tce_cost = backend.to_numpy(state.market.periodic_tce_cost).astype(np.float64, copy=False)
     purchase_price = backend.to_numpy(state.purchase_price).astype(np.float64, copy=False)
     sales_price = backend.to_numpy(state.sales_price).astype(np.float64, copy=False)
@@ -37,6 +54,8 @@ def _good_metric_arrays(
     recent_inventory_inflow = backend.to_numpy(state.recent_inventory_inflow).astype(np.float64, copy=False)
     role = backend.to_numpy(state.role).astype(np.int32, copy=False)
     needs_level = backend.to_numpy(state.needs_level).astype(np.float64, copy=False)
+    effective_need = _effective_need_matrix(base_need=base_need_all, elastic_need=elastic_need, needs_level=needs_level)
+    consumption_need_total = np.maximum(np.sum(effective_need, axis=0, dtype=np.float64), _EPSILON)
     consumer_mask = role == ROLE_CONSUMER
     retailer_mask = role == ROLE_RETAILER
     observed_purchase_value = backend.to_numpy(state.recent_purchase_value).astype(np.float64, copy=False)
@@ -68,7 +87,8 @@ def _good_metric_arrays(
         out=np.zeros_like(gross_flow_total),
         where=gross_flow_total > _EPSILON,
     )
-    own_need_scale = needs_level[:, None] * elastic_need[None, :]
+    non_consumption_flow_share = np.clip(1.0 - consumer_flow_share, 0.0, 1.0)
+    own_need_scale = effective_need
     excess_stock = np.maximum(stock - own_need_scale, 0.0)
     excess_stock_total = np.sum(excess_stock, axis=0, dtype=np.float64)
     excess_stock_breadth = np.mean(excess_stock > _EPSILON, axis=0, dtype=np.float64)
@@ -110,6 +130,11 @@ def _good_metric_arrays(
     merchant_sales_value_total = np.sum(merchant_sales_value, axis=0, dtype=np.float64)
     merchant_inventory_inflow_value_total = np.sum(merchant_inventory_inflow_value, axis=0, dtype=np.float64)
     purchase_breadth = np.mean(merchant_purchases > _EPSILON, axis=0, dtype=np.float64)
+    merchant_round_trip_breadth = np.mean(
+        retailer_mask & (recent_purchases > _EPSILON) & (recent_sales > _EPSILON),
+        axis=0,
+        dtype=np.float64,
+    )
     value_purchase_breadth = np.mean(merchant_purchase_value > _EPSILON, axis=0, dtype=np.float64)
 
     inventory_acceptance_share = np.divide(
@@ -171,6 +196,7 @@ def _good_metric_arrays(
     friend_id = backend.to_numpy(state.friend_id)
     local_liquidity = _local_liquidity_diagnostic_arrays(
         friend_id=friend_id,
+        friend_purchased=friend_purchased,
         friend_sold=friend_sold,
         transparency=backend.to_numpy(state.transparency).astype(np.float64, copy=False),
         recent_sales=recent_sales,
@@ -195,6 +221,8 @@ def _good_metric_arrays(
             else 1.0
         ),
     )
+    seller_specialization_salience = _log_salience(local_liquidity["seller_specialization_score"])
+    merchant_round_trip_salience = _log_salience(merchant_round_trip_breadth)
     if friend_purchased.ndim == 3 and friend_sold.ndim == 3 and friend_id.ndim == 2:
         known_friend = friend_id >= 0
         friend_activity = (friend_purchased > _EPSILON) | (friend_sold > _EPSILON)
@@ -220,6 +248,12 @@ def _good_metric_arrays(
         * exchange_route_breadth
         * stock_salience
         * exchange_turnover_balance
+    )
+    intermediation_purity_score = (
+        exchange_media_score
+        * np.sqrt(np.clip(non_consumption_flow_share, 0.0, 1.0))
+        * np.sqrt(np.clip(merchant_round_trip_salience, 0.0, 1.0))
+        * np.sqrt(np.clip(seller_specialization_salience, 0.0, 1.0))
     )
     demand_order = np.argsort(base_need, kind="stable")
     demand_rank = np.empty_like(demand_order)
@@ -262,7 +296,13 @@ def _good_metric_arrays(
         "round_trip_breadth": round_trip_breadth,
         "round_trip_turnover_share": round_trip_turnover_share,
         "consumer_flow_share": consumer_flow_share,
+        "non_consumption_flow_share": non_consumption_flow_share,
         "retailer_stock_share": retailer_stock_share,
+        "merchant_round_trip_breadth": merchant_round_trip_breadth,
+        "intermediation_purity_score": intermediation_purity_score,
+        "storage_class": storage_class,
+        "storage_spoilage_rate": storage_spoilage_rate,
+        "storage_target_multiplier": storage_target_multiplier,
         **local_liquidity,
         "demand_rank": demand_rank,
         "is_rare": is_rare,
@@ -272,6 +312,7 @@ def _good_metric_arrays(
 def _local_liquidity_diagnostic_arrays(
     *,
     friend_id: np.ndarray,
+    friend_purchased: np.ndarray,
     friend_sold: np.ndarray,
     transparency: np.ndarray,
     recent_sales: np.ndarray,
@@ -290,7 +331,7 @@ def _local_liquidity_diagnostic_arrays(
 ) -> dict[str, np.ndarray]:
     goods = recent_sales.shape[1]
     zeros = np.zeros((goods,), dtype=np.float64)
-    if friend_id.ndim != 2 or friend_sold.ndim != 3 or transparency.ndim != 3:
+    if friend_id.ndim != 2 or friend_purchased.ndim != 3 or friend_sold.ndim != 3 or transparency.ndim != 3:
         return {
             "local_liquidity_score": zeros,
             "local_liquidity_acceptance_breadth": zeros,
@@ -300,11 +341,18 @@ def _local_liquidity_diagnostic_arrays(
             "exchange_media_reserve_scale": zeros,
             "exchange_media_reserve_gap": zeros,
             "exchange_media_spread_ok_share": zeros,
+            "local_product_experience_score": zeros,
+            "seller_breadth_reputation_score": zeros,
+            "top_seller_breadth_share": zeros,
+            "endogenous_standardization_score": zeros,
+            "seller_specialization_score": zeros,
+            "top_seller_specialization_share": zeros,
         }
 
     known_friend = friend_id >= 0
     known_count = np.sum(known_friend, axis=1, dtype=np.float64)[:, None]
     visible_sold = np.where(known_friend[:, :, None], friend_sold, 0.0)
+    visible_purchased = np.where(known_friend[:, :, None], friend_purchased, 0.0)
     visible_acceptance = np.sum(visible_sold, axis=1, dtype=np.float64)
     accepting_count = np.sum(visible_sold > _EPSILON, axis=1, dtype=np.float64)
     acceptance_breadth = np.divide(
@@ -378,6 +426,41 @@ def _local_liquidity_diagnostic_arrays(
     )
     reserve_increment = reserve_scale * reserve_score_by_agent
     reserve_gap = np.maximum(reserve_increment - np.maximum(stock - stock_limit, 0.0), 0.0)
+    observation_window = np.maximum(np.maximum(known_count, 1.0) * float(max(history, 1)), 1.0)
+    local_product_activity = np.sum(visible_purchased + visible_sold, axis=1, dtype=np.float64)
+    local_product_experience_by_agent = np.clip(local_product_activity / observation_window, 0.0, 1.0)
+    seller_partner_count = np.sum(visible_sold > _EPSILON, axis=1, dtype=np.float64)
+    seller_breadth_by_agent = np.divide(
+        seller_partner_count,
+        np.maximum(known_count, 1.0),
+        out=np.zeros_like(visible_acceptance),
+        where=known_count > 0,
+    )
+    seller_activity_score = np.clip(visible_acceptance / observation_window, 0.0, 1.0)
+    seller_reputation_by_agent = np.sqrt(
+        np.clip(seller_breadth_by_agent, 0.0, 1.0)
+        * np.clip(seller_activity_score, 0.0, 1.0)
+    )
+    seller_total_activity = np.sum(visible_sold, axis=(1, 2), dtype=np.float64)[:, None]
+    seller_specialization_by_agent = np.divide(
+        visible_acceptance,
+        np.maximum(seller_total_activity, _EPSILON),
+        out=np.zeros_like(visible_acceptance),
+        where=seller_total_activity > _EPSILON,
+    )
+    seller_specialization_score = np.mean(
+        seller_reputation_by_agent * seller_specialization_by_agent,
+        axis=0,
+        dtype=np.float64,
+    )
+    top_seller_specialization_share = np.max(seller_specialization_by_agent, axis=0)
+    local_product_experience_score = np.mean(local_product_experience_by_agent, axis=0, dtype=np.float64)
+    seller_breadth_reputation_score = np.mean(seller_reputation_by_agent, axis=0, dtype=np.float64)
+    top_seller_breadth_share = np.max(seller_breadth_by_agent, axis=0)
+    endogenous_standardization_score = np.sqrt(
+        np.clip(local_product_experience_score, 0.0, 1.0)
+        * np.clip(seller_breadth_reputation_score, 0.0, 1.0)
+    )
 
     return {
         "local_liquidity_score": np.mean(local_score_by_agent, axis=0, dtype=np.float64),
@@ -388,6 +471,12 @@ def _local_liquidity_diagnostic_arrays(
         "exchange_media_reserve_scale": np.sum(reserve_scale * reserve_score_by_agent, axis=0, dtype=np.float64),
         "exchange_media_reserve_gap": np.sum(reserve_gap, axis=0, dtype=np.float64),
         "exchange_media_spread_ok_share": np.mean(spread_ok, axis=0, dtype=np.float64),
+        "local_product_experience_score": local_product_experience_score,
+        "seller_breadth_reputation_score": seller_breadth_reputation_score,
+        "top_seller_breadth_share": top_seller_breadth_share,
+        "endogenous_standardization_score": endogenous_standardization_score,
+        "seller_specialization_score": seller_specialization_score,
+        "top_seller_specialization_share": top_seller_specialization_share,
     }
 
 
@@ -484,7 +573,10 @@ def compute_good_snapshots(
             round_trip_breadth=float(arrays["round_trip_breadth"][good_id]),
             round_trip_turnover_share=float(arrays["round_trip_turnover_share"][good_id]),
             consumer_flow_share=float(arrays["consumer_flow_share"][good_id]),
+            non_consumption_flow_share=float(arrays["non_consumption_flow_share"][good_id]),
             retailer_stock_share=float(arrays["retailer_stock_share"][good_id]),
+            merchant_round_trip_breadth=float(arrays["merchant_round_trip_breadth"][good_id]),
+            intermediation_purity_score=float(arrays["intermediation_purity_score"][good_id]),
             local_liquidity_score=float(arrays["local_liquidity_score"][good_id]),
             local_liquidity_acceptance_breadth=float(arrays["local_liquidity_acceptance_breadth"][good_id]),
             local_liquidity_visible_acceptance=float(arrays["local_liquidity_visible_acceptance"][good_id]),
@@ -493,6 +585,15 @@ def compute_good_snapshots(
             exchange_media_reserve_scale=float(arrays["exchange_media_reserve_scale"][good_id]),
             exchange_media_reserve_gap=float(arrays["exchange_media_reserve_gap"][good_id]),
             exchange_media_spread_ok_share=float(arrays["exchange_media_spread_ok_share"][good_id]),
+            local_product_experience_score=float(arrays["local_product_experience_score"][good_id]),
+            seller_breadth_reputation_score=float(arrays["seller_breadth_reputation_score"][good_id]),
+            top_seller_breadth_share=float(arrays["top_seller_breadth_share"][good_id]),
+            endogenous_standardization_score=float(arrays["endogenous_standardization_score"][good_id]),
+            seller_specialization_score=float(arrays["seller_specialization_score"][good_id]),
+            top_seller_specialization_share=float(arrays["top_seller_specialization_share"][good_id]),
+            storage_class=int(arrays["storage_class"][good_id]),
+            storage_spoilage_rate=float(arrays["storage_spoilage_rate"][good_id]),
+            storage_target_multiplier=float(arrays["storage_target_multiplier"][good_id]),
         )
         for good_id in range(goods)
     ]
@@ -517,7 +618,10 @@ def compute_good_snapshots(
         "round_trip_breadth",
         "round_trip_turnover_share",
         "consumer_flow_share",
+        "non_consumption_flow_share",
         "retailer_stock_share",
+        "merchant_round_trip_breadth",
+        "intermediation_purity_score",
         "local_liquidity_score",
         "local_liquidity_acceptance_breadth",
         "local_liquidity_visible_acceptance",
@@ -526,6 +630,12 @@ def compute_good_snapshots(
         "exchange_media_reserve_scale",
         "exchange_media_reserve_gap",
         "exchange_media_spread_ok_share",
+        "local_product_experience_score",
+        "seller_breadth_reputation_score",
+        "top_seller_breadth_share",
+        "endogenous_standardization_score",
+        "seller_specialization_score",
+        "top_seller_specialization_share",
     }
     if sort_by not in valid_sort_keys:
         raise ValueError(f"Unsupported sort field: {sort_by}")
@@ -688,12 +798,18 @@ def compute_inequality_snapshot(
         backend=backend,
         config=config,
     )
+    fixed_basket_living_standard = _compute_fixed_basket_living_standard_values(
+        state=state,
+        backend=backend,
+    )
     living_standard_gini, living_standard_top_decile_share, living_standard_mean, living_standard_median = _distribution_snapshot(living_standard)
     smith_cost_gini, smith_cost_top_decile_share, smith_cost_mean, smith_cost_median = _distribution_snapshot(smith_cost)
     aspiration_shortfall = np.maximum(1.0 - aspiration_balance, 0.0)
 
     produced = backend.to_numpy(state.produced_this_period).astype(np.float64, copy=False)
     efficiency = backend.to_numpy(state.efficiency).astype(np.float64, copy=False)
+    base_need = backend.to_numpy(state.base_need).astype(np.float64, copy=False)
+    elastic_need = backend.to_numpy(state.market.elastic_need).astype(np.float64, copy=False)
     produced_by_good = np.sum(produced, axis=0, dtype=np.float64)
     production_time_value = float(np.sum(produced_by_good * average_price, dtype=np.float64))
     direct_production_time = float(np.sum(produced / np.maximum(efficiency, _EPSILON), dtype=np.float64))
@@ -701,6 +817,18 @@ def compute_inequality_snapshot(
     tce_time_value = float(state.market.total_cost_of_tce_in_time)
     spoilage_time_value = float(state.market.total_cost_of_spoilage_in_time)
     friction_time_value = tce_time_value + spoilage_time_value
+    time_budget = np.full((base_need.shape[0],), float(config.cycle_time_budget), dtype=np.float64)
+    fixed_capacity_upper, fixed_capacity_greedy = _planner_capacity_bounds(
+        efficiency=efficiency,
+        time_budget=time_budget,
+        demand_vector=np.sum(base_need, axis=0, dtype=np.float64),
+    )
+    elastic_capacity_upper, elastic_capacity_greedy = _planner_capacity_bounds(
+        efficiency=efficiency,
+        time_budget=time_budget,
+        demand_vector=elastic_need * float(base_need.shape[0]),
+    )
+    fixed_basket_mean = float(np.mean(fixed_basket_living_standard, dtype=np.float64)) if fixed_basket_living_standard.size else 0.0
 
     return InequalitySnapshot(
         stock_value_gini=stock_value_gini,
@@ -741,6 +869,15 @@ def compute_inequality_snapshot(
         tce_share_of_time_budget=_safe_ratio(tce_time_value, available_time),
         spoilage_share_of_time_budget=_safe_ratio(spoilage_time_value, available_time),
         friction_share_of_time_budget=_safe_ratio(friction_time_value, available_time),
+        fixed_basket_living_standard_mean=fixed_basket_mean,
+        fixed_basket_living_standard_median=float(np.median(fixed_basket_living_standard)) if fixed_basket_living_standard.size else 0.0,
+        fixed_basket_living_standard_p10=_quantile_value(fixed_basket_living_standard, 0.10),
+        fixed_basket_living_standard_p90=_quantile_value(fixed_basket_living_standard, 0.90),
+        substitution_lift_mean=_safe_ratio(living_standard_mean, fixed_basket_mean),
+        fixed_basket_capacity_upper_bound=fixed_capacity_upper,
+        fixed_basket_capacity_greedy_bound=fixed_capacity_greedy,
+        elastic_basket_capacity_upper_bound=elastic_capacity_upper,
+        elastic_basket_capacity_greedy_bound=elastic_capacity_greedy,
     )
 
 
@@ -931,9 +1068,9 @@ def _compute_living_standard_components(
     sold_this_period = backend.to_numpy(state.sold_this_period).astype(np.float64, copy=False)
     sold_last_period = backend.to_numpy(state.sold_last_period).astype(np.float64, copy=False)
 
-    elastic_need_scaled = elastic_need[None, :] * needs_level[:, None]
+    effective_need = _effective_need_matrix(base_need=base_need, elastic_need=elastic_need, needs_level=needs_level)
     efficiency_safe = np.maximum(efficiency, _EPSILON)
-    surplus_value = stock - (elastic_need_scaled * config.max_needs_increase)
+    surplus_value = stock - (effective_need * config.max_needs_increase)
 
     valued_surplus = np.empty_like(surplus_value, dtype=np.float64)
     negative_mask = surplus_value < 0.0
@@ -949,9 +1086,9 @@ def _compute_living_standard_components(
     if np.any(positive_mask):
         positive_surplus = surplus_value[positive_mask]
         sales_cap = config.stock_limit_multiplier * (
-            (sold_this_period[positive_mask] - sold_last_period[positive_mask]) + elastic_need_scaled[positive_mask]
+            (sold_this_period[positive_mask] - sold_last_period[positive_mask]) + effective_need[positive_mask]
         )
-        self_use_cap = elastic_need_scaled[positive_mask] * config.max_needs_increase
+        self_use_cap = effective_need[positive_mask] * config.max_needs_increase
         valued_surplus[positive_mask] = np.where(
             recent_sales[positive_mask] > positive_surplus,
             np.minimum(positive_surplus, sales_cap) * sales_price[positive_mask],
@@ -961,9 +1098,9 @@ def _compute_living_standard_components(
 
     wealth_minus_needs = float(config.cycle_time_budget) + np.sum(valued_surplus, axis=1, dtype=np.float64)
     need_value = np.where(
-        recent_purchases > elastic_need_scaled,
-        purchase_price * elastic_need_scaled,
-        elastic_need_scaled / efficiency_safe,
+        recent_purchases > effective_need,
+        purchase_price * effective_need,
+        effective_need / efficiency_safe,
     )
     total_needs_value = np.sum(need_value, axis=1, dtype=np.float64)
 
@@ -974,7 +1111,7 @@ def _compute_living_standard_components(
     ) / total_needs_value[valid_mask]
 
     baseline_quantity = np.sum(base_need, axis=1, dtype=np.float64)
-    fulfilled_quantity = np.maximum(elastic_need_scaled - need_remaining, 0.0)
+    fulfilled_quantity = np.maximum(effective_need - need_remaining, 0.0)
     achieved_quantity = np.sum(fulfilled_quantity, axis=1, dtype=np.float64)
     living_standard = np.ones_like(baseline_quantity, dtype=np.float64)
     valid_baseline = baseline_quantity > _EPSILON
@@ -983,6 +1120,123 @@ def _compute_living_standard_components(
         0.0,
     )
     return living_standard, total_needs_value, aspiration_balance
+
+
+def _compute_fixed_basket_living_standard_values(
+    *,
+    state: SimulationState,
+    backend: BaseBackend,
+) -> np.ndarray:
+    base_need = backend.to_numpy(state.base_need).astype(np.float64, copy=False)
+    need_remaining = backend.to_numpy(state.need).astype(np.float64, copy=False)
+    needs_level = backend.to_numpy(state.needs_level).astype(np.float64, copy=False)
+    elastic_need = backend.to_numpy(state.market.elastic_need).astype(np.float64, copy=False)
+    effective_need = _effective_need_matrix(base_need=base_need, elastic_need=elastic_need, needs_level=needs_level)
+    fulfilled_quantity = np.maximum(effective_need - need_remaining, 0.0)
+    per_good_level = np.divide(
+        fulfilled_quantity,
+        np.maximum(base_need, _EPSILON),
+        out=np.zeros_like(fulfilled_quantity, dtype=np.float64),
+        where=base_need > _EPSILON,
+    )
+    if per_good_level.size == 0:
+        return np.zeros((base_need.shape[0],), dtype=np.float64)
+    return np.min(per_good_level, axis=1)
+
+
+def _planner_capacity_bounds(
+    *,
+    efficiency: np.ndarray,
+    time_budget: np.ndarray,
+    demand_vector: np.ndarray,
+    iterations: int = 18,
+) -> tuple[float, float]:
+    demand = np.maximum(demand_vector.astype(np.float64, copy=False), 0.0)
+    positive_goods = np.flatnonzero(demand > _EPSILON)
+    if efficiency.size == 0 or time_budget.size == 0 or positive_goods.size == 0:
+        return 0.0, 0.0
+
+    rates = np.maximum(efficiency.astype(np.float64, copy=False), 0.0)
+    budget = np.maximum(time_budget.astype(np.float64, copy=False), 0.0)
+    total_budget = float(np.sum(budget, dtype=np.float64))
+    if total_budget <= _EPSILON:
+        return 0.0, 0.0
+
+    # Upper bound: sum per-good minimum production times for one basket while
+    # allowing each good to pick its own best producers. This ignores cross-good
+    # time conflicts, so it is deliberately optimistic and must not be used by
+    # agents as a decision rule.
+    sorted_agents_by_good: dict[int, np.ndarray] = {}
+    min_times = np.zeros(demand.size, dtype=np.float64)
+    for good_id in positive_goods:
+        order = np.argsort(rates[:, good_id], kind="stable")[::-1]
+        sorted_agents_by_good[int(good_id)] = order
+        remaining = float(demand[good_id])
+        used_time = 0.0
+        for agent_id in order:
+            rate = float(rates[agent_id, good_id])
+            available_time = float(budget[agent_id])
+            if rate <= _EPSILON or available_time <= _EPSILON:
+                continue
+            possible_output = rate * available_time
+            if possible_output >= remaining:
+                used_time += remaining / rate
+                remaining = 0.0
+                break
+            used_time += available_time
+            remaining -= possible_output
+        if remaining > _EPSILON:
+            return 0.0, 0.0
+        min_times[good_id] = used_time
+
+    minimum_one_basket_time = float(np.sum(min_times[positive_goods], dtype=np.float64))
+    if minimum_one_basket_time <= _EPSILON:
+        return 0.0, 0.0
+    upper_bound = total_budget / minimum_one_basket_time
+
+    def feasible(level: float, good_order: np.ndarray) -> bool:
+        remaining_time = budget.copy()
+        for good_id in good_order:
+            remaining_output = level * float(demand[good_id])
+            if remaining_output <= _EPSILON:
+                continue
+            for agent_id in sorted_agents_by_good[int(good_id)]:
+                available_time = float(remaining_time[agent_id])
+                if available_time <= _EPSILON:
+                    continue
+                rate = float(rates[agent_id, good_id])
+                if rate <= _EPSILON:
+                    continue
+                possible_output = rate * available_time
+                if possible_output >= remaining_output:
+                    remaining_time[agent_id] -= remaining_output / rate
+                    remaining_output = 0.0
+                    break
+                remaining_time[agent_id] = 0.0
+                remaining_output -= possible_output
+            if remaining_output > _EPSILON:
+                return False
+        return True
+
+    orders = [
+        positive_goods[np.argsort(min_times[positive_goods], kind="stable")[::-1]],
+        positive_goods[np.argsort(demand[positive_goods], kind="stable")[::-1]],
+        positive_goods[np.argsort(demand[positive_goods], kind="stable")],
+        positive_goods,
+    ]
+    greedy_bound = 0.0
+    for good_order in orders:
+        low = 0.0
+        high = upper_bound
+        for _ in range(iterations):
+            midpoint = (low + high) * 0.5
+            if feasible(midpoint, good_order):
+                low = midpoint
+            else:
+                high = midpoint
+        greedy_bound = max(greedy_bound, low)
+
+    return float(upper_bound), float(greedy_bound)
 
 
 def _gini_coefficient(values: np.ndarray) -> float:

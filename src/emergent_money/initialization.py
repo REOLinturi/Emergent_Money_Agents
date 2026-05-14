@@ -31,7 +31,8 @@ def create_initial_state(config: SimulationConfig, backend: BaseBackend) -> Simu
     learned_efficiency = np.full(config.agent_good_shape, config.initial_efficiency, dtype=np.float32)
     efficiency = np.maximum(innate_efficiency, learned_efficiency)
 
-    stock_limit = (base_need * config.stock_limit_multiplier).astype(np.float32)
+    storage_target = config.storage_target_multipliers()[None, :]
+    stock_limit = (base_need * config.stock_limit_multiplier * storage_target).astype(np.float32)
     previous_stock_limit = stock_limit.copy()
     stock = (base_need * config.initial_stock_fraction).astype(np.float32)
 
@@ -39,6 +40,9 @@ def create_initial_state(config: SimulationConfig, backend: BaseBackend) -> Simu
     friend_activity = np.zeros(config.friend_shape, dtype=np.float32)
     friend_purchased = np.zeros(config.transparency_shape, dtype=np.float32)
     friend_sold = np.zeros(config.transparency_shape, dtype=np.float32)
+    reputation_product_experience = np.zeros(config.agent_good_shape, dtype=np.float32)
+    reputation_seller_activity = np.zeros(config.agent_good_shape, dtype=np.float32)
+    reputation_seller_breadth = np.zeros(config.agent_good_shape, dtype=np.float32)
     transparency = np.full(config.transparency_shape, config.initial_transparency, dtype=np.float32)
 
     cycle_time_budget = np.full((config.population,), config.cycle_time_budget, dtype=np.float32)
@@ -144,6 +148,9 @@ def create_initial_state(config: SimulationConfig, backend: BaseBackend) -> Simu
         friend_activity=backend.asarray(friend_activity, dtype=np.float32),
         friend_purchased=backend.asarray(friend_purchased, dtype=np.float32),
         friend_sold=backend.asarray(friend_sold, dtype=np.float32),
+        reputation_product_experience=backend.asarray(reputation_product_experience, dtype=np.float32),
+        reputation_seller_activity=backend.asarray(reputation_seller_activity, dtype=np.float32),
+        reputation_seller_breadth=backend.asarray(reputation_seller_breadth, dtype=np.float32),
         transparency=backend.asarray(transparency, dtype=np.float32),
         cycle_time_budget=backend.asarray(cycle_time_budget, dtype=np.float32),
         time_remaining=backend.asarray(time_remaining, dtype=np.float32),

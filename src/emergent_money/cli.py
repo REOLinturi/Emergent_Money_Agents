@@ -87,6 +87,73 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experimental-exchange-media-reserve-min-acceptance", type=float, default=0.01)
     parser.add_argument("--experimental-exchange-media-reserve-bootstrap-floor", type=float, default=1.0)
     parser.add_argument(
+        "--experimental-storage-class-mode",
+        default="none",
+        choices=("none", "mod3", "rare-good"),
+        help=(
+            "Phenomenon-path experiment: vary product storability classes. 'mod3' assigns "
+            "classes by internal good_id %% 3; 'rare-good' makes the lowest-demand quartile "
+            "well storable and leaves other goods medium. Class 0 is poorly storable, "
+            "1 medium, 2 well storable."
+        ),
+    )
+    parser.add_argument("--experimental-storage-poor-spoilage-multiplier", type=float, default=2.0)
+    parser.add_argument("--experimental-storage-medium-spoilage-multiplier", type=float, default=1.0)
+    parser.add_argument("--experimental-storage-good-spoilage-multiplier", type=float, default=0.25)
+    parser.add_argument("--experimental-storage-poor-target-multiplier", type=float, default=0.5)
+    parser.add_argument("--experimental-storage-medium-target-multiplier", type=float, default=1.0)
+    parser.add_argument("--experimental-storage-good-target-multiplier", type=float, default=2.0)
+    parser.add_argument(
+        "--experimental-standardization-mode",
+        default="none",
+        choices=("none", "rare", "common", "rare-gradient", "common-gradient", "random"),
+        help=(
+            "Phenomenon-path experiment: reduce verification friction for selected goods without "
+            "giving agents global market information. 'rare' targets the lowest-demand quartile; "
+            "'common' targets the highest-demand quartile."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-standardization-strength",
+        type=float,
+        default=0.0,
+        help="0..1 friction-relief strength for --experimental-standardization-mode; 0 disables it.",
+    )
+    parser.add_argument(
+        "--experimental-standardization-random-seed",
+        type=int,
+        default=0,
+        help="Additional seed offset for the random standardization control mode.",
+    )
+    parser.add_argument(
+        "--experimental-transparency-learning-mode",
+        default="legacy-volume",
+        choices=("legacy-volume", "recent-count"),
+        help=(
+            "Transparency learning rule. 'legacy-volume' preserves the current base-need/volume "
+            "calibration; 'recent-count' uses decayed transaction counts so high transparency "
+            "requires repeated recent trades and is not increased by trade size."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-endogenous-standardization-strength",
+        type=float,
+        default=0.0,
+        help=(
+            "0..1 local transparency boost from a direct friend's own recent product experience "
+            "and seller-breadth reputation; 0 disables it."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-endogenous-standardization-need-power",
+        type=float,
+        default=0.5,
+        help=(
+            "Need-normalization exponent for endogenous standardization evidence. Higher values "
+            "require more repeated observations for high-direct-need goods."
+        ),
+    )
+    parser.add_argument(
         "--experimental-session-replan-passes",
         type=int,
         default=1,
@@ -147,6 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--seed", type=int, default=2009)
+    parser.add_argument("--initial-transparency", type=float, default=0.70)
     parser.add_argument("--talent-probability", type=float, default=0.20)
     parser.add_argument("--use-value-price-floor-fraction", type=float, default=1.0)
     parser.add_argument(
@@ -222,6 +290,19 @@ def main(argv: list[str] | None = None) -> int:
         experimental_exchange_media_reserve_bias=args.experimental_exchange_media_reserve_bias,
         experimental_exchange_media_reserve_min_acceptance=args.experimental_exchange_media_reserve_min_acceptance,
         experimental_exchange_media_reserve_bootstrap_floor=args.experimental_exchange_media_reserve_bootstrap_floor,
+        experimental_storage_class_mode=args.experimental_storage_class_mode,
+        experimental_poor_storage_spoilage_multiplier=args.experimental_storage_poor_spoilage_multiplier,
+        experimental_medium_storage_spoilage_multiplier=args.experimental_storage_medium_spoilage_multiplier,
+        experimental_good_storage_spoilage_multiplier=args.experimental_storage_good_spoilage_multiplier,
+        experimental_poor_storage_target_multiplier=args.experimental_storage_poor_target_multiplier,
+        experimental_medium_storage_target_multiplier=args.experimental_storage_medium_target_multiplier,
+        experimental_good_storage_target_multiplier=args.experimental_storage_good_target_multiplier,
+        experimental_standardization_mode=args.experimental_standardization_mode,
+        experimental_standardization_strength=args.experimental_standardization_strength,
+        experimental_standardization_random_seed=args.experimental_standardization_random_seed,
+        experimental_transparency_learning_mode=args.experimental_transparency_learning_mode,
+        experimental_endogenous_standardization_strength=args.experimental_endogenous_standardization_strength,
+        experimental_endogenous_standardization_need_power=args.experimental_endogenous_standardization_need_power,
         experimental_session_replan_passes=args.experimental_session_replan_passes,
         experimental_session_replan_after_trade=args.experimental_session_replan_after_trade,
         experimental_session_disable_replan_cache=args.experimental_session_disable_replan_cache,
@@ -232,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         experimental_session_candidate_depth=args.experimental_session_candidate_depth,
         seed=args.seed,
+        initial_transparency=args.initial_transparency,
         talent_probability=args.talent_probability,
         use_value_price_floor_fraction=args.use_value_price_floor_fraction,
         lifestyle_promotion_threshold=args.lifestyle_promotion_threshold,

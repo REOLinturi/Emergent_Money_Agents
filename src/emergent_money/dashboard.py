@@ -320,7 +320,10 @@ class ArtifactDashboardController:
             "round_trip_breadth",
             "round_trip_turnover_share",
             "consumer_flow_share",
+            "non_consumption_flow_share",
             "retailer_stock_share",
+            "merchant_round_trip_breadth",
+            "intermediation_purity_score",
             "local_liquidity_score",
             "local_liquidity_acceptance_breadth",
             "local_liquidity_visible_acceptance",
@@ -329,6 +332,12 @@ class ArtifactDashboardController:
             "exchange_media_reserve_scale",
             "exchange_media_reserve_gap",
             "exchange_media_spread_ok_share",
+            "local_product_experience_score",
+            "seller_breadth_reputation_score",
+            "top_seller_breadth_share",
+            "endogenous_standardization_score",
+            "seller_specialization_score",
+            "top_seller_specialization_share",
         }
         if sort_by not in valid_sort_keys:
             raise ValueError(f"Unsupported sort field: {sort_by}")

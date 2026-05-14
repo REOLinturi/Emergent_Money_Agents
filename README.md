@@ -14,7 +14,9 @@ This repository contains the historical Emergent Money documents together with a
 - `MODEL_INFORMATION_BOUNDARY.md` - agent decision information boundary: only local own-history and direct-acquaintance observations may affect heuristics
 - `MARKET_ORDER_AND_PARALLELISM.md` - why exact barter commit stays sequential, how that maps to primitive exchange, and when richer market institutions can justify more parallel execution
 - `PHENOMENON_BASELINE.md` - current fallback baseline for the Rust per-agent basket phenomenon path and rejection rules for weaker optimization experiments
+- `WELFARE_METRICS.md` - dashboard welfare metrics, fixed-vs-elastic basket interpretation, and offline capacity diagnostics
 - `LIQUIDITY_RESERVE_PLAN.md` - planned local exchange-media reserve heuristic, report compatibility notes, and acceptance tests
+- `MONEY_EMERGENCE_DIAGNOSTIC_PLAN.md` - diagnostic plan for why rare goods do or do not become exchange media
 - `RESEARCH_MECHANISM_AND_HYPOTHESES.md` - paper-oriented contribution framing, research hypotheses, Burt structural-holes note, and source/data plan for the network-spillover line
 
 ## Current Direction
@@ -220,6 +222,18 @@ Numerical tolerance rule: bit-for-bit parity remains useful for finding porting 
 The separate realism-oriented basket path is enabled with `--experimental-agent-basket-planning`. It lets the active agent evaluate the visible opportunity set across its need basket rather than reproducing the exact Legacy-C one-need-at-a-time loop. It is not an exact-reference path. The currently retained phenomenon variant is the Rust-owned per-agent basket path: `--experimental-agent-basket-planning`, `--experimental-session-replan-after-trade`, `--experimental-session-clearing-phenomenon-exchange` left off, and usually `--experimental-session-candidate-depth 1`. The active agent plans from its own observed acquaintance data, commits one revalidated trade, rebuilds its local plan from the changed state, and only then continues. This differs from exact Legacy-C sequencing, but avoids both stale one-shot shopping lists and synchronized local clearing markets.
 
 Offer-good exhaustion rule: the active path forbids only the exhausted `need_good/offer_good` pair before replanning. A 2026-05-07 diagnostic found that the rejected global rule, which banned the exhausted offer good for every need in the active basket, reproduced the weak-growth anomaly; pairwise exhaustion restored the earlier promising 3000/100/100 c50 profile (`living_standard_mean` about `3.03`, rare-money about `15.6 %`). The global rule remains available only through `--experimental-session-global-offer-exhaustion` for named rollback diagnostics.
+
+Money-emergence diagnostics can also vary product-level verification friction without giving agents global money knowledge. Use `--experimental-standardization-mode none|rare|common|rare-gradient|common-gradient|random` with `--experimental-standardization-strength 0..1`. This changes only effective trade transparency for the selected goods during scoring and execution, leaving local observations, price rules, and reserve heuristics unchanged. See `MONEY_EMERGENCE_DIAGNOSTIC_PLAN.md` for the rationale and test matrix.
+
+The preferred realism-oriented standardization path is endogenous and local. Use `--experimental-endogenous-standardization-strength 0..1` with `--experimental-endogenous-standardization-need-power` to let direct acquaintances' product experience, seller activity, and seller breadth reduce verification friction. This path does not give agents global money status or a rare-good label; it only lets repeated local circulation make a good easier to verify.
+
+After a run, use `scripts/analyze_exchange_media_purity.py <run-dir>` to separate ordinary consumer supply-chain throughput from non-consumption intermediation. It writes `exchange_media_purity_report.json` and `.csv` into the run directory and ranks goods by exchange-media score, intermediation purity, and value-weighted monetary score.
+
+Dyadic transparency learning is scaled by traded volume relative to the product's original `base_need`, not the current elastic need. This prevents lower elastic demand from creating artificial transparency and prevents high-volume goods from gaining transparency merely because their unit need is large.
+
+For realism-oriented phenomenon runs, `--experimental-transparency-learning-mode recent-count` makes transparency depend on decayed transaction counts instead of traded volume. A large trade is one observation, not many observations, and old observations fade through `activity_discount`; maintaining high transparency therefore requires repeated recent trade. The default `legacy-volume` preserves the older base-need/volume calibration for compatibility checks.
+
+Product storability can be varied with `--experimental-storage-class-mode mod3|rare-good`. `mod3` assigns the current run's dense internal goods to poor/medium/good storage classes by `good_id % 3`, changes product-specific spoilage rates, and changes the stock target multiplier interpreted as desired inventory days. `rare-good` makes the lowest-demand quartile well storable and leaves other goods medium; use it to test whether durable, standardized rare goods behave more like metal money. The default mode `none` preserves previous behavior.
 
 Current 3000/100/100 phenomenon smoke-test template:
 

@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from emergent_money.analytics import compute_good_snapshots
+from emergent_money.analytics import compute_good_snapshots, compute_inequality_snapshot
 from emergent_money.config import SimulationConfig
 from emergent_money.engine import SimulationEngine
 from emergent_money.state import ROLE_CONSUMER, ROLE_RETAILER
@@ -98,8 +99,12 @@ def test_exchange_media_score_requires_relative_tce_and_local_circulation() -> N
     assert goods[0].excess_stock_breadth > 0.0
     assert goods[0].round_trip_breadth > 0.0
     assert goods[0].consumer_flow_share == 0.0
+    assert goods[0].merchant_round_trip_breadth > 0.0
+    assert goods[0].seller_specialization_score > 0.0
+    assert goods[0].intermediation_purity_score > 0.0
     assert goods[1].monetary_score > 0.0
     assert goods[1].exchange_media_score == 0.0
+    assert goods[1].intermediation_purity_score == 0.0
 
 
 def test_exchange_media_score_does_not_require_retailer_role() -> None:
@@ -174,6 +179,7 @@ def test_local_liquidity_reserve_diagnostics_require_local_friend_evidence() -> 
     }
     assert goods_without_local_evidence[0].local_liquidity_score == 0.0
     assert goods_without_local_evidence[0].exchange_media_reserve_score == 0.0
+    assert goods_without_local_evidence[0].endogenous_standardization_score == 0.0
 
     state.friend_sold[:, 0, 0] = 10.0
     goods_with_local_evidence = {
@@ -186,6 +192,12 @@ def test_local_liquidity_reserve_diagnostics_require_local_friend_evidence() -> 
     assert goods_with_local_evidence[0].local_liquidity_visible_acceptance > 0.0
     assert goods_with_local_evidence[0].exchange_media_reserve_score > 0.0
     assert goods_with_local_evidence[0].exchange_media_reserve_gap > 0.0
+    assert goods_with_local_evidence[0].local_product_experience_score > 0.0
+    assert goods_with_local_evidence[0].seller_breadth_reputation_score > 0.0
+    assert goods_with_local_evidence[0].top_seller_breadth_share == pytest.approx(0.5)
+    assert goods_with_local_evidence[0].endogenous_standardization_score > 0.0
+    assert goods_with_local_evidence[0].seller_specialization_score > 0.0
+    assert goods_with_local_evidence[0].top_seller_specialization_share == pytest.approx(1.0)
 
 
 def test_exchange_media_reserve_diagnostic_obeys_spread_gate() -> None:
@@ -216,3 +228,61 @@ def test_exchange_media_reserve_diagnostic_obeys_spread_gate() -> None:
     assert goods[0].local_liquidity_score > 0.0
     assert goods[0].exchange_media_reserve_score == 0.0
     assert goods[0].exchange_media_spread_ok_share == 0.0
+
+
+def test_living_standard_preserves_original_basket_floor() -> None:
+    config = SimulationConfig(
+        population=1,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+
+    # Elastic demand is discretionary: the original basket remains the floor.
+    state.base_need[0] = np.array([1.0, 1.0], dtype=np.float32)
+    state.market.elastic_need[...] = np.array([2.0, 0.0], dtype=np.float32)
+    state.needs_level[0] = 1.0
+    state.need[0] = 0.0
+
+    snapshot = compute_inequality_snapshot(state=state, backend=engine.backend, config=config)
+
+    assert snapshot.living_standard_mean == pytest.approx(1.0)
+    assert snapshot.fixed_basket_living_standard_mean == pytest.approx(1.0)
+    assert snapshot.fixed_basket_living_standard_median == pytest.approx(1.0)
+    assert snapshot.substitution_lift_mean == pytest.approx(1.0)
+
+    state.needs_level[0] = 2.0
+    state.need[0] = 0.0
+    snapshot = compute_inequality_snapshot(state=state, backend=engine.backend, config=config)
+
+    assert snapshot.living_standard_mean == pytest.approx(2.0)
+    assert snapshot.fixed_basket_living_standard_mean == pytest.approx(1.0)
+    assert snapshot.substitution_lift_mean == pytest.approx(2.0)
+
+
+def test_planner_capacity_bounds_are_reported_as_diagnostics() -> None:
+    config = SimulationConfig(
+        population=2,
+        goods=2,
+        acquaintances=1,
+        active_acquaintances=1,
+        demand_candidates=1,
+        supply_candidates=1,
+    )
+    engine = SimulationEngine.create(config=config, backend_name="numpy")
+    state = engine.state
+
+    state.base_need[...] = np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float32)
+    state.market.elastic_need[...] = np.array([1.0, 1.0], dtype=np.float32)
+    state.efficiency[...] = np.array([[10.0, 1.0], [1.0, 10.0]], dtype=np.float32)
+
+    snapshot = compute_inequality_snapshot(state=state, backend=engine.backend, config=config)
+
+    assert snapshot.fixed_basket_capacity_upper_bound >= snapshot.fixed_basket_capacity_greedy_bound
+    assert snapshot.elastic_basket_capacity_upper_bound >= snapshot.elastic_basket_capacity_greedy_bound
+    assert snapshot.fixed_basket_capacity_greedy_bound > 0.0
+    assert snapshot.elastic_basket_capacity_greedy_bound > 0.0

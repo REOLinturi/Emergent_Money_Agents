@@ -90,6 +90,21 @@ Install the freshly built wheel into the project virtual environment:
 .\.venv\Scripts\python.exe -m pip install --force-reinstall native\legacy_search\target\wheels\legacy_native_search-0.1.0-cp311-abi3-win_amd64.whl
 ```
 
+If a running dashboard or long-run process locks the installed native module,
+do not overwrite `site-packages` mid-run. Build to a temporary wheel directory
+and put the package on the project `src` path for the next run:
+
+```powershell
+$env:CARGO_TARGET_DIR = "C:\tmp\em_legacy_search_target"
+cmd.exe /c '"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && .venv\Scripts\python.exe -m maturin build --release -m native\legacy_search\Cargo.toml --out C:\tmp\em_legacy_search_wheels'
+New-Item -ItemType Directory -Force -Path src\_legacy_native_search
+tar -xf C:\tmp\em_legacy_search_wheels\legacy_native_search-0.1.0-cp311-abi3-win_amd64.whl -C src _legacy_native_search/__init__.py _legacy_native_search/_legacy_native_search.pyd
+```
+
+The local `src\_legacy_native_search` directory is ignored by Git. With
+`PYTHONPATH=src`, the run uses that freshly built extension before any older
+global install.
+
 Check that the virtual environment loads the native module:
 
 ```powershell
@@ -167,25 +182,68 @@ $env:PYTHONPATH = "src"
 
 ## Reliable Long-Run Launch From Codex
 
-When launching overnight runs from the Codex desktop sandbox, a plain PowerShell background launch can fail in two recurring ways:
+Preferred helper for the current per-agent basket phenomenon path:
 
-- `Start-Process` may fail if the inherited Windows environment contains both `Path` and `PATH`.
-- Child processes started inside the sandbox can disappear when the tool call ends, even though the command itself is valid.
+```powershell
+.\scripts\start_agentbasket_overnight.ps1 -Cycles 1500 -Port 8057
+```
 
-The reliable pattern is to put the run and dashboard commands in `.cmd` files and launch those files with Windows `cmd start` outside the sandbox. The current rules-fix 3000/30/100 run uses:
+The helper:
+
+- creates a timestamped `runs\...` artifact directory unless `-RunName` is given
+- writes `run.ps1` and `dashboard.ps1` into that run directory for repeatability
+- starts both the long run and read-only dashboard in hidden PowerShell windows
+- uses the accepted per-agent basket path with Rust stage math, after-trade replan, full `3000 / 100 / 100` local opportunity evaluation, and exchange-media reserve diagnostics
+- sets `$ErrorActionPreference = "Continue"` only around the Python command so CuPy `CUDA_PATH` warnings written to stderr are logged but do not abort the wrapper
+- prints the dashboard URL and a checkpoint-cycle check command
+
+Example with an explicit run name:
+
+```powershell
+.\scripts\start_agentbasket_overnight.ps1 -RunName agentbasket_reserve_b05_welfare_3000_100_100_1500_seed2009_night -Cycles 1500 -Port 8057
+```
+
+When launching overnight runs from the Codex desktop sandbox, a plain PowerShell background launch can fail in recurring ways:
+
+- inherited sandbox permissions may prevent writing logs or checkpoints
+- child processes can disappear if the launch was not actually outside the sandbox
+- PowerShell can treat native-process stderr as an error when `$ErrorActionPreference = "Stop"`, so harmless CuPy warnings can stop the wrapper
+- an already-used dashboard port can leave the browser attached to an old run
+
+If the helper returns but no checkpoint appears within about a minute, relaunch it out-of-sandbox/elevated through Codex. If a port is busy, choose a new `-Port`.
+
+Canonical wrapper rule for future run scripts:
+
+```powershell
+$ErrorActionPreference = "Stop"
+"run started $(Get-Date -Format o)" | Out-File -FilePath $WrapperLog -Encoding utf8
+
+# Native Python stderr is not authoritative on this project: CPU-only CuPy
+# imports can emit a CUDA_PATH warning even when the simulation is healthy.
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& ".\.venv\Scripts\python.exe" @Args 2>&1 | Tee-Object -FilePath $TerminalLog
+$ExitCode = $LASTEXITCODE
+$ErrorActionPreference = $PreviousErrorActionPreference
+
+"run ended $(Get-Date -Format o) exit=$ExitCode" | Out-File -FilePath $WrapperLog -Append -Encoding utf8
+exit $ExitCode
+```
+
+Do not put the Python command under `$ErrorActionPreference = "Stop"` while redirecting `2>&1`. PowerShell can convert harmless native stderr, especially the CuPy `CUDA_PATH` warning, into `NativeCommandError` and stop the wrapper before it records the true Python exit code. Also prefer launching the generated run/dashboard scripts outside the Codex sandbox when they must write under `runs\...`; otherwise the symptom can be an empty run directory, a wrapper log with only `run started`, or no fresh checkpoint.
+
+Older `.cmd`-based launch scripts remain useful for fixed historical experiments. The older reliable pattern was to put the run and dashboard commands in `.cmd` files and launch those files with Windows `cmd start` outside the sandbox. Example:
 
 ```powershell
 C:\Windows\System32\cmd.exe /c "start ""Emergent Rulesfix Run"" /min ""C:\Codex_Demot\Emergent_money\run_rulesfix_3000_30_100_2000.cmd"" & start ""Emergent Rulesfix Dashboard"" /min ""C:\Codex_Demot\Emergent_money\dashboard_rulesfix_3000_30_100_2000.cmd"""
 ```
 
-In Codex, run this with elevated/out-of-sandbox permission if normal launch returns but no checkpoint or listening dashboard appears. The `.cmd` run script should include resume logic against `checkpoint_latest.json`, so restarting the same script continues from the latest completed checkpoint rather than overwriting the run.
-
 Verification commands:
 
 ```powershell
-netstat -ano | Select-String -Pattern ':8051'
-Invoke-WebRequest -Uri 'http://127.0.0.1:8051/' -UseBasicParsing -TimeoutSec 10
-.\.venv\Scripts\python.exe -c "import json; print(json.load(open(r'C:\Codex_Demot\Emergent_money\tmp\phenomenon_basket_rulesfix_3000_30_100_2000_seed2027_20260503\checkpoint_latest.json', encoding='utf-8'))['cycle'])"
+netstat -ano | Select-String -Pattern ':8057'
+Invoke-WebRequest -Uri 'http://127.0.0.1:8057/' -UseBasicParsing -TimeoutSec 10
+.\.venv\Scripts\python.exe -c "import json; print(json.load(open(r'C:\Codex_Demot\Emergent_money\runs\RUN_NAME\checkpoint_latest.json', encoding='utf-8'))['cycle'])"
 ```
 
 ## Migration Checklist

@@ -84,6 +84,9 @@ class SimulationState:
     friend_activity: ArrayLike
     friend_purchased: ArrayLike
     friend_sold: ArrayLike
+    reputation_product_experience: ArrayLike
+    reputation_seller_activity: ArrayLike
+    reputation_seller_breadth: ArrayLike
     transparency: ArrayLike
     cycle_time_budget: ArrayLike
     time_remaining: ArrayLike

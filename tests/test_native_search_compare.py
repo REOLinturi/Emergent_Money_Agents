@@ -101,7 +101,7 @@ def test_compare_recorded_exchange_search_calls_reports_mismatch_details() -> No
 
 def test_run_native_search_comparison_captures_exact_cycle_calls() -> None:
     summary = run_native_search_comparison(
-        cycles=5,
+        cycles=10,
         seeds=[2009],
         config=SimulationConfig(
             population=32,
